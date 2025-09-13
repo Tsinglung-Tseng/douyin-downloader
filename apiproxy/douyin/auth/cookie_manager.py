@@ -23,6 +23,13 @@ try:
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
+    # 定义占位类型以避免NameError
+    class Page:
+        pass
+    class Browser:
+        pass
+    class BrowserContext:
+        pass
     logger.warning("Playwright未安装，自动Cookie管理不可用")
 
 

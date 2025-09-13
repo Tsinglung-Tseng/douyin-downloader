@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip3 install:*)",
+      "Bash(pip3 list:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

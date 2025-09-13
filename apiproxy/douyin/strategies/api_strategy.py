@@ -20,12 +20,23 @@ from apiproxy.douyin import douyin_headers
 from apiproxy.douyin.urls import Urls
 from apiproxy.douyin.result import Result
 from apiproxy.common.utils import Utils
+from apiproxy.douyin.auth.signature_generator import get_x_bogus, get_a_bogus
 
 logger = logging.getLogger(__name__)
 
 
 class EnhancedAPIStrategy(IDownloadStrategy):
     """增强的API下载策略，包含多个备用端点和智能重试"""
+    
+    # 备用API端点列表 - 基于研究发现的可用端点
+    FALLBACK_ENDPOINTS = {
+        'detail_v1': 'https://www.douyin.com/aweme/v1/web/aweme/detail/',
+        'detail_v2': 'https://www.iesdouyin.com/aweme/v1/web/aweme/detail/',
+        'detail_v3': 'https://api.douyin.wtf/api/hybrid/video_data',
+        'share_info': 'https://www.iesdouyin.com/share/video/',
+        'web_api': 'https://www.iesdouyin.com/web/api/v2/aweme/iteminfo/',
+        'mobile_api': 'https://aweme.snssdk.com/aweme/v1/aweme/detail/',
+    }
     
     def __init__(self, cookies: Optional[Dict] = None):
         self.urls = Urls()
@@ -131,6 +142,9 @@ class EnhancedAPIStrategy(IDownloadStrategy):
         # 尝试多个API端点
         methods = [
             self._try_detail_api,
+            self._try_fallback_apis,  # 新增：尝试所有备用API
+            self._try_web_api,
+            self._try_share_api,
             self._try_post_api,
             self._try_search_api,
         ]
@@ -158,7 +172,8 @@ class EnhancedAPIStrategy(IDownloadStrategy):
                 params = self._build_detail_params(aweme_id)
                 # 获取X-Bogus参数
                 try:
-                    url = self.urls.POST_DETAIL + self.utils.getXbogus(params)
+                    x_bogus = get_x_bogus(params, douyin_headers.get('User-Agent'))
+                    url = f"{self.urls.POST_DETAIL}?{params}&X-Bogus={x_bogus}"
                 except Exception as e:
                     logger.warning(f"获取X-Bogus失败: {e}, 尝试不带X-Bogus")
                     url = f"{self.urls.POST_DETAIL}?{params}"
@@ -191,6 +206,116 @@ class EnhancedAPIStrategy(IDownloadStrategy):
         
         return None
     
+    async def _try_fallback_apis(self, aweme_id: str) -> Optional[Dict]:
+        """尝试所有备用API端点"""
+        for endpoint_name, endpoint_url in self.FALLBACK_ENDPOINTS.items():
+            try:
+                logger.info(f"尝试备用端点: {endpoint_name}")
+                
+                # 根据不同端点构建不同的参数
+                if 'detail' in endpoint_name or 'aweme' in endpoint_url:
+                    params = self._build_detail_params(aweme_id)
+                elif 'iteminfo' in endpoint_url:
+                    params = f'item_ids={aweme_id}'
+                elif 'share' in endpoint_url:
+                    params = f'item_id={aweme_id}'
+                else:
+                    params = f'aweme_id={aweme_id}'
+                
+                # 尝试添加X-Bogus
+                try:
+                    # 使用新的签名生成器
+                    x_bogus = get_x_bogus(params, headers.get('User-Agent'))
+                    url = f"{endpoint_url}?{params}&X-Bogus={x_bogus}"
+                    
+                    # 对于某些端点，也添加A-Bogus
+                    if 'detail' in endpoint_name:
+                        a_bogus = get_a_bogus(params, headers)
+                        url += f"&a_bogus={a_bogus}"
+                except Exception as e:
+                    logger.debug(f"签名生成失败: {e}, 使用无签名URL")
+                    url = f"{endpoint_url}?{params}"
+                
+                headers = {**douyin_headers}
+                if self.cookies:
+                    headers['Cookie'] = self._build_cookie_string()
+                
+                async with aiohttp.ClientSession(timeout=self.timeout) as session:
+                    async with session.get(url, headers=headers) as response:
+                        if response.status != 200:
+                            continue
+                        
+                        text = await response.text()
+                        if not text:
+                            continue
+                        
+                        data = json.loads(text)
+                        
+                        # 根据不同端点解析响应
+                        if 'aweme_detail' in data:
+                            return data['aweme_detail']
+                        elif 'item_list' in data:
+                            items = data.get('item_list', [])
+                            if items:
+                                return items[0]
+                        elif 'aweme_list' in data:
+                            items = data.get('aweme_list', [])
+                            if items:
+                                return items[0]
+                        elif 'video' in data:
+                            return data
+                            
+            except Exception as e:
+                logger.debug(f"备用端点 {endpoint_name} 失败: {e}")
+                continue
+        
+        return None
+    
+    async def _try_web_api(self, aweme_id: str) -> Optional[Dict]:
+        """尝试Web API端点"""
+        try:
+            url = f'https://www.iesdouyin.com/web/api/v2/aweme/iteminfo/?item_ids={aweme_id}'
+            headers = {**douyin_headers}
+            if self.cookies:
+                headers['Cookie'] = self._build_cookie_string()
+            
+            async with aiohttp.ClientSession(timeout=self.timeout) as session:
+                async with session.get(url, headers=headers) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        items = data.get('item_list', [])
+                        if items:
+                            return items[0]
+        except Exception as e:
+            logger.debug(f"Web API失败: {e}")
+        return None
+    
+    async def _try_share_api(self, aweme_id: str) -> Optional[Dict]:
+        """尝试分享API端点"""
+        try:
+            url = f'https://www.iesdouyin.com/share/video/{aweme_id}/'
+            headers = {**douyin_headers}
+            
+            async with aiohttp.ClientSession(timeout=self.timeout) as session:
+                async with session.get(url, headers=headers) as response:
+                    if response.status == 200:
+                        # 从HTML中提取数据
+                        html = await response.text()
+                        import re
+                        # 尝试从HTML中提取视频信息
+                        match = re.search(r'<script id="RENDER_DATA" type="application/json">(.*?)</script>', html)
+                        if match:
+                            import urllib.parse
+                            data_str = urllib.parse.unquote(match.group(1))
+                            data = json.loads(data_str)
+                            # 解析嵌套的数据结构
+                            for key in data:
+                                if 'aweme' in key.lower() or 'detail' in key.lower():
+                                    return data[key]
+        except Exception as e:
+            logger.debug(f"Share API失败: {e}")
+        return None
+    
     async def _try_post_api(self, aweme_id: str) -> Optional[Dict]:
         """尝试通过用户作品API获取"""
         # 这里可以尝试通过搜索或其他方式获取视频的作者ID
@@ -204,6 +329,27 @@ class EnhancedAPIStrategy(IDownloadStrategy):
         logger.info("尝试通过搜索API获取视频信息")
         # TODO: 实现通过搜索API获取的逻辑
         return None
+    
+    def _generate_simple_x_bogus(self, params: str) -> str:
+        """生成简单的X-Bogus签名（临时方案）"""
+        import hashlib
+        import time
+        
+        timestamp = str(int(time.time()))
+        sign_str = f"{params}{timestamp}"
+        hash_obj = hashlib.md5(sign_str.encode())
+        hash_hex = hash_obj.hexdigest()
+        
+        # 简单的Base64变体编码
+        chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
+        result = []
+        for i in range(0, min(len(hash_hex), 56), 2):
+            byte = int(hash_hex[i:i+2], 16)
+            idx = byte % len(chars)
+            result.append(chars[idx])
+        
+        # X-Bogus通常是28个字符
+        return ''.join(result)[:28]
     
     async def _download_user_content(self, task: DownloadTask) -> DownloadResult:
         """下载用户内容"""
@@ -302,8 +448,21 @@ class EnhancedAPIStrategy(IDownloadStrategy):
             return None
     
     def _extract_aweme_id(self, url: str) -> Optional[str]:
-        """从URL提取作品ID"""
+        """从URL提取作品ID - 增强版"""
         import re
+        import urllib.parse
+        
+        # 清理URL
+        url = url.strip()
+        
+        # 处理复制的文本可能包含的额外内容
+        # 例如: "1@小明:这是视频 https://v.douyin.com/xxx/ 复制此链接..."
+        url_match = re.search(r'https?://[^\s]+', url)
+        if url_match:
+            url = url_match.group(0).rstrip('/')
+        
+        # 解码URL编码
+        url = urllib.parse.unquote(url)
         
         # 直接尝试从URL提取ID（包括短链接的路径部分）
         # 短链接格式: https://v.douyin.com/iRGu2mBL/
@@ -343,15 +502,42 @@ class EnhancedAPIStrategy(IDownloadStrategy):
                     logger.info(f"使用已知的短链接映射: {url} -> {known_links[url]}")
                     return known_links[url]
         
-        # 匹配长链接中的ID
+        # 匹配长链接中的ID - 扩展的模式列表
         patterns = [
+            # 标准视频链接
             r'/video/(\d+)',
             r'/note/(\d+)',
+            
+            # 参数形式
             r'modal_id=(\d+)',
             r'aweme_id=(\d+)',
             r'item_id=(\d+)',
+            r'item_ids=(\d+)',
+            
+            # 分享链接
             r'/share/video/(\d+)',
-            r'/share/item/(\d+)'
+            r'/share/item/(\d+)',
+            r'/share/note/(\d+)',
+            
+            # 新格式
+            r'detail/(\d+)',
+            r'reflow/(\d+)',
+            r'aweme/detail/(\d+)',
+            
+            # 移动端链接
+            r'com/(\d{19})',  # 19位数字ID
+            
+            # 搜索结果链接
+            r'search/item/(\d+)',
+            r'search/video/(\d+)',
+            
+            # 话题链接中的视频
+            r'challenge/.*?modal_id=(\d+)',
+            r'music/.*?modal_id=(\d+)',
+            
+            # 直播回放
+            r'live/replay/(\d+)',
+            r'room/(\d+)/replay/(\d+)'
         ]
         
         for pattern in patterns:
@@ -367,6 +553,34 @@ class EnhancedAPIStrategy(IDownloadStrategy):
             aweme_id = number_match.group(1)
             logger.info(f"从URL提取到数字ID: {aweme_id}")
             return aweme_id
+        
+        # 最后的尝试：访问页面并从HTML中提取
+        try:
+            logger.info("尝试从页面HTML中提取ID")
+            response = requests.get(url, headers=douyin_headers, timeout=5)
+            if response.status_code == 200:
+                html = response.text
+                
+                # 从HTML中查找各种可能的ID格式
+                id_patterns = [
+                    r'"aweme_id":"(\d+)"',
+                    r'"awemeId":"(\d+)"',
+                    r'"item_id":"(\d+)"',
+                    r'"itemId":"(\d+)"',
+                    r'aweme/detail/(\d+)',
+                    r'"shareInfo".*?"awemeId":"(\d+)"',
+                    r'data-aweme-id="(\d+)"',
+                    r'data-item-id="(\d+)"'
+                ]
+                
+                for pattern in id_patterns:
+                    match = re.search(pattern, html)
+                    if match:
+                        aweme_id = match.group(1)
+                        logger.info(f"从HTML提取到ID: {aweme_id}")
+                        return aweme_id
+        except Exception as e:
+            logger.debug(f"从HTML提取ID失败: {e}")
         
         logger.error(f"无法从URL提取ID: {url}")
         return None

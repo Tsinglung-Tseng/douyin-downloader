@@ -162,7 +162,8 @@ def argument():
 
 def yamlConfig():
     curPath = os.path.dirname(os.path.realpath(sys.argv[0]))
-    yamlPath = os.path.join(curPath, "config.yml")
+    # 使用固定的配置文件 config_douyin.yml
+    yamlPath = os.path.join(curPath, "config_douyin.yml")
     
     try:
         with open(yamlPath, 'r', encoding='utf-8') as f:
@@ -186,7 +187,7 @@ def yamlConfig():
                 configModel["end_time"] = time.strftime("%Y-%m-%d", time.localtime())
             
     except FileNotFoundError:
-        douyin_logger.warning("未找到配置文件config.yml")
+        douyin_logger.warning(f"未找到配置文件: {yamlPath}")
     except Exception as e:
         douyin_logger.warning(f"配置文件解析出错: {str(e)}")
 

@@ -43,6 +43,7 @@ from apiproxy.douyin.urls import Urls
 from apiproxy.douyin.result import Result
 from apiproxy.common.utils import Utils
 from apiproxy.douyin.auth.cookie_manager import AutoCookieManager
+from apiproxy.douyin.auth.signature_generator import get_x_bogus, get_a_bogus
 from apiproxy.douyin.database import DataBase
 
 # 配置日志
@@ -137,21 +138,35 @@ class RetryManager:
 
 class UnifiedDownloader:
     """统一下载器"""
-    
-    def __init__(self, config_path: str = "config.yml"):
+
+    def __init__(self, config_path: str = "config_downloader.yml"):
         self.config = self._load_config(config_path)
         self.urls_helper = Urls()
         self.result_helper = Result()
         self.utils = Utils()
-        
+
         # 组件初始化
         self.stats = DownloadStats()
         self.rate_limiter = RateLimiter(max_per_second=2)
         self.retry_manager = RetryManager(max_retries=self.config.get('retry_times', 3))
+
+        # msToken和签名相关
+        self.mstoken = self._generate_mstoken()
+        self.device_id = self._generate_device_id()
         
         # Cookie与请求头（延迟初始化，支持自动获取）
         self.cookies = self.config.get('cookies') if 'cookies' in self.config else self.config.get('cookie')
+
+        # 检测Cookie配置类型
         self.auto_cookie = bool(self.config.get('auto_cookie')) or (isinstance(self.config.get('cookie'), str) and self.config.get('cookie') == 'auto') or (isinstance(self.config.get('cookies'), str) and self.config.get('cookies') == 'auto')
+
+        # 检测browser-cookies模式（yt-dlp方式）
+        self.browser_cookie = None
+        if isinstance(self.cookies, str) and self.cookies.startswith('browser:'):
+            # 格式: browser:chrome 或 browser:edge 等
+            self.browser_cookie = self.cookies.split(':', 1)[1] if ':' in self.cookies else 'chrome'
+            self.cookies = None  # 稍后从浏览器获取
+
         self.headers = {**douyin_headers}
         # 避免服务端使用brotli导致aiohttp无法解压（未安装brotli库时会出现空响应）
         self.headers['accept-encoding'] = 'gzip, deflate'
@@ -167,17 +182,13 @@ class UnifiedDownloader:
     def _load_config(self, config_path: str) -> Dict:
         """加载配置文件"""
         if not os.path.exists(config_path):
-            # 兼容配置文件命名：优先 config.yml，其次 config_simple.yml
-            alt_path = 'config_simple.yml'
-            if os.path.exists(alt_path):
-                config_path = alt_path
-            else:
-                # 返回一个空配置，由命令行参数决定
-                return {}
-        
+            # 配置文件不存在时返回空配置
+            print(f"警告: 配置文件 {config_path} 不存在，使用默认配置")
+            return {}
+
         with open(config_path, 'r', encoding='utf-8') as f:
             config = yaml.safe_load(f)
-        
+
         # 简化配置兼容：links/link, output_dir/path, cookie/cookies
         if 'links' in config and 'link' not in config:
             config['link'] = config['links']
@@ -187,11 +198,36 @@ class UnifiedDownloader:
             config['cookies'] = config['cookie']
         if isinstance(config.get('cookies'), str) and config.get('cookies') == 'auto':
             config['auto_cookie'] = True
-        
+
         # 允许无 link（通过命令行传入）
         # 如果两者都没有，后续会在运行时提示
-        
+
         return config
+
+    def _generate_mstoken(self) -> str:
+        """生成msToken"""
+        import random
+        import string
+
+        # msToken格式通常是一个随机字符串，长度约107个字符
+        # 字符集包含大小写字母、数字和特殊字符
+        charset = string.ascii_letters + string.digits + '-_='
+
+        # 生成基础随机字符串
+        base_length = random.randint(100, 110)
+        mstoken = ''.join(random.choice(charset) for _ in range(base_length))
+
+        logger.info(f"生成msToken: {mstoken[:20]}...")
+        return mstoken
+
+    def _generate_device_id(self) -> str:
+        """生成设备ID"""
+        import random
+
+        # 设备ID通常是19位数字
+        device_id = ''.join([str(random.randint(0, 9)) for _ in range(19)])
+        logger.info(f"生成设备ID: {device_id}")
+        return device_id
     
     def _build_cookie_string(self) -> str:
         """构建Cookie字符串"""
@@ -209,24 +245,56 @@ class UnifiedDownloader:
         return ''
 
     async def _initialize_cookies_and_headers(self):
-        """初始化Cookie与请求头（支持自动获取）"""
-        # 若配置为字符串 'auto'，视为未提供，触发自动获取
+        """初始化Cookie与请求头（支持多种获取方式）"""
+
+        # 方式1: browser:chrome 模式（yt-dlp方式）
+        if self.browser_cookie:
+            try:
+                console.print(f"[cyan]🔐 从{self.browser_cookie}浏览器提取Cookie（yt-dlp方式）...[/cyan]")
+                from apiproxy.douyin.auth.browser_cookies import get_browser_cookies
+
+                # 直接从浏览器数据库提取Cookie
+                browser_cookies = get_browser_cookies(self.browser_cookie, '.douyin.com')
+
+                if browser_cookies:
+                    self.cookies = browser_cookies
+                    cookie_str = self._build_cookie_string()
+                    if cookie_str:
+                        self.headers['Cookie'] = cookie_str
+                        from apiproxy.douyin import douyin_headers
+                        douyin_headers['Cookie'] = cookie_str
+
+                        # 显示提取到的关键Cookie
+                        if 'msToken' in browser_cookies:
+                            console.print(f"[green]✅ 提取到msToken: {browser_cookies['msToken'][:30]}...[/green]")
+                        if 'ttwid' in browser_cookies:
+                            console.print(f"[green]✅ 提取到ttwid: {browser_cookies['ttwid'][:30]}...[/green]")
+                        if 'sessionid' in browser_cookies:
+                            console.print(f"[green]✅ 提取到sessionid（已登录）[/green]")
+
+                        console.print(f"[green]✅ 从{self.browser_cookie}成功提取{len(browser_cookies)}个Cookie[/green]")
+                        return
+
+            except Exception as e:
+                logger.error(f"从浏览器提取Cookie失败: {e}")
+                console.print(f"[red]❌ 从{self.browser_cookie}提取Cookie失败: {e}[/red]")
+
+        # 方式2: 配置为字符串 'auto'
         if isinstance(self.cookies, str) and self.cookies.strip().lower() == 'auto':
             self.cookies = None
-        
-        # 若已显式提供cookies，则直接使用
+
+        # 方式3: 已显式提供cookies
         cookie_str = self._build_cookie_string()
         if cookie_str:
             self.headers['Cookie'] = cookie_str
-            # 同时设置到全局 douyin_headers，确保所有 API 请求都能使用
             from apiproxy.douyin import douyin_headers
             douyin_headers['Cookie'] = cookie_str
             return
-        
-        # 自动获取Cookie
+
+        # 方式4: 自动获取Cookie（Playwright方式）
         if self.auto_cookie:
             try:
-                console.print("[cyan]🔐 正在自动获取Cookie...[/cyan]")
+                console.print("[cyan]🔐 正在自动获取Cookie（Playwright方式）...[/cyan]")
                 async with AutoCookieManager(cookie_file='cookies.pkl', headless=False) as cm:
                     cookies_list = await cm.get_cookies()
                     if cookies_list:
@@ -234,7 +302,6 @@ class UnifiedDownloader:
                         cookie_str = self._build_cookie_string()
                         if cookie_str:
                             self.headers['Cookie'] = cookie_str
-                            # 同时设置到全局 douyin_headers，确保所有 API 请求都能使用
                             from apiproxy.douyin import douyin_headers
                             douyin_headers['Cookie'] = cookie_str
                             console.print("[green]✅ Cookie获取成功[/green]")
@@ -243,7 +310,7 @@ class UnifiedDownloader:
             except Exception as e:
                 logger.warning(f"自动获取Cookie失败: {e}")
                 console.print("[yellow]⚠️ 自动获取Cookie失败，继续尝试无Cookie模式[/yellow]")
-        
+
         # 未能获取Cookie则不设置，使用默认headers
     
     def detect_content_type(self, url: str) -> ContentType:
@@ -495,67 +562,414 @@ class UnifiedDownloader:
             import traceback
             traceback.print_exc()
         
-        # 如果 Douyin 类失败，尝试备用接口（iesdouyin，无需X-Bogus）
+        # 如果 Douyin 类失败，尝试增强的备用接口
         try:
-            fallback_url = f"https://www.iesdouyin.com/web/api/v2/aweme/iteminfo/?item_ids={video_id}"
-            logger.info(f"尝试备用接口获取视频信息: {fallback_url}")
-            
-            # 设置更通用的请求头
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            # 尝试使用带X-Bogus的官方API
+            params = self._build_detail_params(video_id)
+
+            # 生成X-Bogus签名
+            try:
+                x_bogus = get_x_bogus(params, douyin_headers.get('User-Agent'))
+                api_url = f"https://www.douyin.com/aweme/v1/web/aweme/detail/?{params}&X-Bogus={x_bogus}"
+                logger.info(f"尝试使用X-Bogus签名的API: {api_url[:100]}...")
+            except Exception as e:
+                logger.warning(f"生成X-Bogus失败: {e}, 使用无签名备用接口")
+                api_url = f"https://www.iesdouyin.com/web/api/v2/aweme/iteminfo/?item_ids={video_id}"
+
+            # 设置更完整的请求头
+            headers = {**douyin_headers}
+            headers.update({
                 'Referer': 'https://www.douyin.com/',
                 'Accept': 'application/json, text/plain, */*',
                 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
                 'Accept-Encoding': 'gzip, deflate',
                 'Connection': 'keep-alive'
-            }
-            
+            })
+
+            # 添加Cookie和msToken
+            if hasattr(self, 'cookies') and self.cookies:
+                cookie_str = self._build_cookie_string()
+                if cookie_str:
+                    if 'msToken=' not in cookie_str:
+                        cookie_str += f'; msToken={self.mstoken}'
+                    headers['Cookie'] = cookie_str
+            else:
+                headers['Cookie'] = f'msToken={self.mstoken}'
+
             async with aiohttp.ClientSession() as session:
-                async with session.get(fallback_url, headers=headers, timeout=15) as response:
+                async with session.get(api_url, headers=headers, timeout=15) as response:
                     logger.info(f"备用接口响应状态: {response.status}")
                     if response.status != 200:
                         logger.error(f"备用接口请求失败，状态码: {response.status}")
                         return None
-                    
+
                     text = await response.text()
                     logger.info(f"备用接口响应内容长度: {len(text)}")
-                    
+
                     if not text:
                         logger.error("备用接口响应为空")
                         return None
-                    
+
                     try:
                         data = json.loads(text)
-                        logger.info(f"备用接口返回数据: {data}")
-                        
-                        item_list = (data or {}).get('item_list') or []
-                        if item_list:
-                            aweme_detail = item_list[0]
-                            logger.info("备用接口成功获取视频信息")
+
+                        # 处理不同的响应格式
+                        if 'aweme_detail' in data:
+                            aweme_detail = data['aweme_detail']
+                            logger.info("备用接口成功获取视频信息（aweme_detail格式）")
                             return aweme_detail
+                        elif 'item_list' in data:
+                            item_list = data.get('item_list', [])
+                            if item_list:
+                                aweme_detail = item_list[0]
+                                logger.info("备用接口成功获取视频信息（item_list格式）")
+                                return aweme_detail
                         else:
-                            logger.error("备用接口返回的数据中没有 item_list")
-                            
+                            logger.error(f"备用接口返回未知格式: {list(data.keys())}")
+
                     except json.JSONDecodeError as e:
                         logger.error(f"备用接口JSON解析失败: {e}")
-                        logger.error(f"原始响应内容: {text}")
+                        logger.error(f"原始响应内容: {text[:500]}...")
                         return None
-                        
+
         except Exception as e:
             logger.error(f"备用接口获取视频信息失败: {e}")
-        
-        return None
+
+        # 最后的降级策略：HTML解析
+        return await self._try_html_parse(video_id)
     
     def _build_detail_params(self, aweme_id: str) -> str:
         """构建详情API参数"""
-        # 使用与现有 douyinapi.py 相同的参数格式
+        # 使用增强的参数格式，包含必要的设备指纹信息
         params = [
             f'aweme_id={aweme_id}',
             'device_platform=webapp',
-            'aid=6383'
+            'aid=6383',
+            'channel=channel_pc_web',
+            'pc_client_type=1',
+            'version_code=170400',
+            'version_name=17.4.0',
+            'cookie_enabled=true',
+            'screen_width=1920',
+            'screen_height=1080',
+            'browser_language=zh-CN',
+            'browser_platform=MacIntel',
+            'browser_name=Chrome',
+            'browser_version=122.0.0.0',
+            'browser_online=true',
+            'engine_name=Blink',
+            'engine_version=122.0.0.0',
+            'os_name=Mac',
+            'os_version=10.15.7',
+            'cpu_core_num=8',
+            'device_memory=8',
+            'platform=PC',
+            'downlink=10',
+            'effective_type=4g',
+            'round_trip_time=50',
+            f'msToken={self.mstoken}',
+            f'device_id={self.device_id}',
         ]
         return '&'.join(params)
-    
+
+    async def _try_html_parse(self, video_id: str) -> Optional[Dict]:
+        """HTML解析降级策略 - 当API都失败时尝试从网页解析"""
+        try:
+            logger.info("尝试HTML解析策略获取视频信息")
+
+            # 构建网页URL
+            share_url = f"https://www.iesdouyin.com/share/video/{video_id}/"
+
+            # 设置模拟浏览器的请求头
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Cache-Control': 'no-cache',
+                'Pragma': 'no-cache',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Upgrade-Insecure-Requests': '1'
+            }
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(share_url, headers=headers, timeout=20) as response:
+                    if response.status != 200:
+                        logger.warning(f"HTML页面请求失败，状态码: {response.status}")
+                        return None
+
+                    html = await response.text()
+                    if not html:
+                        logger.warning("HTML页面内容为空")
+                        return None
+
+                    # 解析HTML内容
+                    return self._parse_html_content(html, video_id)
+
+        except Exception as e:
+            logger.error(f"HTML解析策略失败: {e}")
+            return None
+
+    def _parse_html_content(self, html: str, video_id: str) -> Optional[Dict]:
+        """解析HTML内容提取视频信息"""
+        import re
+        import urllib.parse
+
+        try:
+            # 方法1：从RENDER_DATA脚本标签中提取
+            render_data_pattern = r'<script id="RENDER_DATA" type="application/json">(.*?)</script>'
+            match = re.search(render_data_pattern, html, re.DOTALL)
+
+            if match:
+                try:
+                    # URL解码
+                    data_str = urllib.parse.unquote(match.group(1))
+                    data = json.loads(data_str)
+
+                    # 遍历数据查找视频信息
+                    for key, value in data.items():
+                        if isinstance(value, dict):
+                            # 查找包含aweme信息的节点
+                            if 'aweme' in str(value).lower():
+                                aweme_data = self._extract_aweme_from_render_data(value)
+                                if aweme_data:
+                                    logger.info("HTML解析成功（RENDER_DATA方式）")
+                                    return aweme_data
+
+                except Exception as e:
+                    logger.debug(f"解析RENDER_DATA失败: {e}")
+
+            # 方法2：从其他script标签中提取视频信息
+            script_patterns = [
+                r'window\._SSR_HYDRATED_DATA\s*=\s*({.*?});',
+                r'window\.INITIAL_STATE\s*=\s*({.*?});',
+                r'__INITIAL_STATE__\s*=\s*({.*?});',
+                r'window\.__NUXT__\s*=\s*({.*?});'
+            ]
+
+            for pattern in script_patterns:
+                matches = re.finditer(pattern, html, re.DOTALL)
+                for match in matches:
+                    try:
+                        data_str = match.group(1)
+                        data = json.loads(data_str)
+                        aweme_data = self._extract_aweme_from_script_data(data, video_id)
+                        if aweme_data:
+                            logger.info(f"HTML解析成功（script方式）")
+                            return aweme_data
+                    except Exception as e:
+                        logger.debug(f"解析script数据失败: {e}")
+
+            # 方法3：提取meta标签中的信息
+            meta_info = self._extract_meta_info(html)
+            if meta_info:
+                # 构建基础的aweme结构
+                basic_aweme = {
+                    'aweme_id': video_id,
+                    'desc': meta_info.get('description', ''),
+                    'create_time': int(time.time()),  # 使用当前时间戳作为创建时间
+                    'author': {
+                        'nickname': meta_info.get('author', 'unknown'),
+                        'unique_id': meta_info.get('author', 'unknown'),
+                        'sec_uid': ''
+                    },
+                    'statistics': {
+                        'digg_count': 0,
+                        'comment_count': 0,
+                        'share_count': 0,
+                        'play_count': 0
+                    },
+                    'video': {
+                        'play_addr': {'url_list': []},
+                        'download_addr': {'url_list': []},
+                        'cover': {'url_list': [meta_info.get('cover', '')]}
+                    },
+                    'music': {
+                        'title': '',
+                        'play_url': {'url_list': []}
+                    }
+                }
+                logger.info("HTML解析成功（meta标签方式，基础信息）")
+                return basic_aweme
+
+            logger.warning("HTML解析未能提取到有效的视频信息")
+            return None
+
+        except Exception as e:
+            logger.error(f"HTML内容解析失败: {e}")
+            return None
+
+    def _extract_aweme_from_render_data(self, data: Dict) -> Optional[Dict]:
+        """从RENDER_DATA中提取aweme信息"""
+        try:
+            # 递归搜索aweme相关数据
+            if isinstance(data, dict):
+                for key, value in data.items():
+                    if 'aweme' in key.lower() and isinstance(value, dict):
+                        if 'aweme_id' in value or 'video' in value:
+                            return value
+                    elif isinstance(value, (dict, list)):
+                        result = self._extract_aweme_from_render_data(value)
+                        if result:
+                            return result
+            elif isinstance(data, list):
+                for item in data:
+                    if isinstance(item, (dict, list)):
+                        result = self._extract_aweme_from_render_data(item)
+                        if result:
+                            return result
+        except Exception:
+            pass
+        return None
+
+    def _extract_aweme_from_script_data(self, data: Dict, video_id: str) -> Optional[Dict]:
+        """从script数据中提取aweme信息"""
+        try:
+            # 递归搜索包含video_id的aweme数据
+            if isinstance(data, dict):
+                if data.get('aweme_id') == video_id:
+                    return data
+                for value in data.values():
+                    if isinstance(value, (dict, list)):
+                        result = self._extract_aweme_from_script_data(value, video_id)
+                        if result:
+                            return result
+            elif isinstance(data, list):
+                for item in data:
+                    if isinstance(item, (dict, list)):
+                        result = self._extract_aweme_from_script_data(item, video_id)
+                        if result:
+                            return result
+        except Exception:
+            pass
+        return None
+
+    def _extract_meta_info(self, html: str) -> Dict:
+        """从meta标签中提取基础信息"""
+        import re
+
+        meta_info = {}
+
+        # 提取标题/描述
+        title_pattern = r'<title[^>]*>(.*?)</title>'
+        title_match = re.search(title_pattern, html, re.IGNORECASE | re.DOTALL)
+        if title_match:
+            meta_info['description'] = title_match.group(1).strip()
+
+        # 提取meta描述
+        desc_pattern = r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']*)["\']'
+        desc_match = re.search(desc_pattern, html, re.IGNORECASE)
+        if desc_match:
+            meta_info['description'] = desc_match.group(1).strip()
+
+        # 提取作者信息
+        author_patterns = [
+            r'<meta[^>]+name=["\']author["\'][^>]+content=["\']([^"\']*)["\']',
+            r'@([^@\s]+)',  # 从标题中提取@用户名
+        ]
+
+        for pattern in author_patterns:
+            author_match = re.search(pattern, html, re.IGNORECASE)
+            if author_match:
+                meta_info['author'] = author_match.group(1).strip()
+                break
+
+        # 提取封面图
+        cover_patterns = [
+            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']*)["\']',
+            r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']*)["\']'
+        ]
+
+        for pattern in cover_patterns:
+            cover_match = re.search(pattern, html, re.IGNORECASE)
+            if cover_match:
+                meta_info['cover'] = cover_match.group(1).strip()
+                break
+
+        return meta_info
+
+    def _enhance_video_url(self, url: str) -> str:
+        """增强视频URL，尝试获取更高质量的版本"""
+        if not url:
+            return url
+
+        # 替换为无水印版本
+        enhanced_url = url.replace('playwm', 'play')
+
+        # 尝试获取更高质量
+        quality_replacements = [
+            ('720p', '1080p'),
+            ('480p', '720p'),
+            ('360p', '480p'),
+        ]
+
+        for old_quality, new_quality in quality_replacements:
+            if old_quality in enhanced_url:
+                enhanced_url = enhanced_url.replace(old_quality, new_quality)
+                break
+
+        logger.debug(f"URL增强: {url} -> {enhanced_url}")
+        return enhanced_url
+
+    def _get_fallback_user_agent(self) -> str:
+        """获取备用User-Agent"""
+        user_agents = [
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2.1 Safari/605.1.15',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0'
+        ]
+        import random
+        return random.choice(user_agents)
+
+    async def _validate_video_info(self, video_info: Dict) -> bool:
+        """验证视频信息的完整性"""
+        if not video_info:
+            return False
+
+        # 基本字段检查
+        required_fields = ['aweme_id']
+        for field in required_fields:
+            if field not in video_info:
+                logger.warning(f"视频信息缺少必要字段: {field}")
+                return False
+
+        # 检查是否有可下载的内容
+        has_video = bool(video_info.get('video', {}).get('play_addr', {}).get('url_list'))
+        has_images = bool(video_info.get('images'))
+
+        if not has_video and not has_images:
+            logger.warning("视频信息中没有可下载的媒体内容")
+            return False
+
+        return True
+
+    async def _get_alternative_endpoints(self, aweme_id: str) -> List[str]:
+        """获取备用API端点列表"""
+        endpoints = [
+            f"https://www.douyin.com/aweme/v1/web/aweme/detail/?aweme_id={aweme_id}",
+            f"https://www.iesdouyin.com/aweme/v1/web/aweme/detail/?aweme_id={aweme_id}",
+            f"https://www.iesdouyin.com/web/api/v2/aweme/iteminfo/?item_ids={aweme_id}",
+            f"https://aweme.snssdk.com/aweme/v1/aweme/detail/?aweme_id={aweme_id}",
+        ]
+
+        # 为每个端点添加完整参数
+        enhanced_endpoints = []
+        for endpoint in endpoints:
+            if '?' in endpoint:
+                base_url, existing_params = endpoint.split('?', 1)
+                full_params = existing_params + '&' + self._build_detail_params(aweme_id).replace(f'aweme_id={aweme_id}&', '')
+            else:
+                full_params = self._build_detail_params(aweme_id)
+                base_url = endpoint
+
+            enhanced_endpoints.append(f"{base_url}?{full_params}")
+
+        return enhanced_endpoints
+
     async def _download_media_files(self, video_info: Dict, progress=None) -> bool:
         """下载媒体文件"""
         try:
@@ -640,26 +1054,32 @@ class UnifiedDownloader:
             # 优先使用play_addr_h264
             play_addr = video_info.get('video', {}).get('play_addr_h264') or \
                        video_info.get('video', {}).get('play_addr')
-            
+
             if play_addr:
                 url_list = play_addr.get('url_list', [])
                 if url_list:
-                    # 替换URL以获取无水印版本
-                    url = url_list[0]
-                    url = url.replace('playwm', 'play')
-                    url = url.replace('720p', '1080p')
+                    # 使用增强的URL处理
+                    url = self._enhance_video_url(url_list[0])
                     return url
-            
+
             # 备用：download_addr
             download_addr = video_info.get('video', {}).get('download_addr')
             if download_addr:
                 url_list = download_addr.get('url_list', [])
                 if url_list:
-                    return url_list[0]
-                    
+                    return self._enhance_video_url(url_list[0])
+
+            # 再次备用：bit_rate数组中的URL
+            bit_rate_list = video_info.get('video', {}).get('bit_rate', [])
+            for bit_rate in bit_rate_list:
+                play_addr = bit_rate.get('play_addr', {})
+                url_list = play_addr.get('url_list', [])
+                if url_list:
+                    return self._enhance_video_url(url_list[0])
+
         except Exception as e:
             logger.error(f"获取无水印URL失败: {e}")
-        
+
         return None
     
     def _get_best_quality_url(self, url_list: List[str]) -> Optional[str]:
@@ -956,23 +1376,49 @@ class UnifiedDownloader:
                 'browser_platform=MacIntel',
                 'browser_name=Chrome',
                 'browser_version=122.0.0.0',
-                'browser_online=true'
+                'browser_online=true',
+                'engine_name=Blink',
+                'engine_version=122.0.0.0',
+                'os_name=Mac',
+                'os_version=10.15.7',
+                'cpu_core_num=8',
+                'device_memory=8',
+                'platform=PC',
+                'downlink=10',
+                'effective_type=4g',
+                'round_trip_time=50',
+                f'msToken={self.mstoken}',
+                f'device_id={self.device_id}',
             ]
             params = '&'.join(params_list)
 
             api_url = self.urls_helper.USER_FAVORITE_A
 
+            # 使用增强的签名生成
             try:
-                xbogus = self.utils.getXbogus(params)
-                full_url = f"{api_url}{params}&X-Bogus={xbogus}"
+                x_bogus = get_x_bogus(params, self.headers.get('User-Agent'))
+                full_url = f"{api_url}{params}&X-Bogus={x_bogus}"
             except Exception as e:
-                logger.warning(f"获取X-Bogus失败: {e}, 尝试不带X-Bogus")
-                full_url = f"{api_url}{params}"
+                logger.warning(f"获取X-Bogus失败: {e}, 尝试原有方法")
+                try:
+                    xbogus = self.utils.getXbogus(params)
+                    full_url = f"{api_url}{params}&X-Bogus={xbogus}"
+                except Exception as e2:
+                    logger.warning(f"原有X-Bogus方法也失败: {e2}, 使用无签名")
+                    full_url = f"{api_url}{params}"
 
             logger.info(f"请求用户喜欢列表: {full_url[:100]}...")
 
+            # 确保headers包含msToken
+            headers = {**self.headers}
+            if 'Cookie' in headers:
+                if 'msToken=' not in headers['Cookie']:
+                    headers['Cookie'] += f'; msToken={self.mstoken}'
+            else:
+                headers['Cookie'] = f'msToken={self.mstoken}'
+
             async with aiohttp.ClientSession() as session:
-                async with session.get(full_url, headers=self.headers, timeout=10) as response:
+                async with session.get(full_url, headers=headers, timeout=10) as response:
                     if response.status != 200:
                         logger.error(f"请求失败，状态码: {response.status}")
                         return None
@@ -1052,21 +1498,47 @@ class UnifiedDownloader:
                 'browser_platform=MacIntel',
                 'browser_name=Chrome',
                 'browser_version=122.0.0.0',
-                'browser_online=true'
+                'browser_online=true',
+                'engine_name=Blink',
+                'engine_version=122.0.0.0',
+                'os_name=Mac',
+                'os_version=10.15.7',
+                'cpu_core_num=8',
+                'device_memory=8',
+                'platform=PC',
+                'downlink=10',
+                'effective_type=4g',
+                'round_trip_time=50',
+                f'msToken={self.mstoken}',
+                f'device_id={self.device_id}',
             ]
             params = '&'.join(params_list)
 
             api_url = self.urls_helper.USER_MIX_LIST
             try:
-                xbogus = self.utils.getXbogus(params)
-                full_url = f"{api_url}{params}&X-Bogus={xbogus}"
+                x_bogus = get_x_bogus(params, self.headers.get('User-Agent'))
+                full_url = f"{api_url}{params}&X-Bogus={x_bogus}"
             except Exception as e:
-                logger.warning(f"获取X-Bogus失败: {e}, 尝试不带X-Bogus")
-                full_url = f"{api_url}{params}"
+                logger.warning(f"获取X-Bogus失败: {e}, 尝试原有方法")
+                try:
+                    xbogus = self.utils.getXbogus(params)
+                    full_url = f"{api_url}{params}&X-Bogus={xbogus}"
+                except Exception as e2:
+                    logger.warning(f"原有X-Bogus方法也失败: {e2}, 使用无签名")
+                    full_url = f"{api_url}{params}"
 
             logger.info(f"请求用户合集列表: {full_url[:100]}...")
+
+            # 确保headers包含msToken
+            headers = {**self.headers}
+            if 'Cookie' in headers:
+                if 'msToken=' not in headers['Cookie']:
+                    headers['Cookie'] += f'; msToken={self.mstoken}'
+            else:
+                headers['Cookie'] = f'msToken={self.mstoken}'
+
             async with aiohttp.ClientSession() as session:
-                async with session.get(full_url, headers=self.headers, timeout=10) as response:
+                async with session.get(full_url, headers=headers, timeout=10) as response:
                     if response.status != 200:
                         logger.error(f"请求失败，状态码: {response.status}")
                         return None
@@ -1150,21 +1622,47 @@ class UnifiedDownloader:
                 'browser_platform=MacIntel',
                 'browser_name=Chrome',
                 'browser_version=122.0.0.0',
-                'browser_online=true'
+                'browser_online=true',
+                'engine_name=Blink',
+                'engine_version=122.0.0.0',
+                'os_name=Mac',
+                'os_version=10.15.7',
+                'cpu_core_num=8',
+                'device_memory=8',
+                'platform=PC',
+                'downlink=10',
+                'effective_type=4g',
+                'round_trip_time=50',
+                f'msToken={self.mstoken}',
+                f'device_id={self.device_id}',
             ]
             params = '&'.join(params_list)
 
             api_url = self.urls_helper.USER_MIX
             try:
-                xbogus = self.utils.getXbogus(params)
-                full_url = f"{api_url}{params}&X-Bogus={xbogus}"
+                x_bogus = get_x_bogus(params, self.headers.get('User-Agent'))
+                full_url = f"{api_url}{params}&X-Bogus={x_bogus}"
             except Exception as e:
-                logger.warning(f"获取X-Bogus失败: {e}, 尝试不带X-Bogus")
-                full_url = f"{api_url}{params}"
+                logger.warning(f"获取X-Bogus失败: {e}, 尝试原有方法")
+                try:
+                    xbogus = self.utils.getXbogus(params)
+                    full_url = f"{api_url}{params}&X-Bogus={xbogus}"
+                except Exception as e2:
+                    logger.warning(f"原有X-Bogus方法也失败: {e2}, 使用无签名")
+                    full_url = f"{api_url}{params}"
 
             logger.info(f"请求合集作品列表: {full_url[:100]}...")
+
+            # 确保headers包含msToken
+            headers = {**self.headers}
+            if 'Cookie' in headers:
+                if 'msToken=' not in headers['Cookie']:
+                    headers['Cookie'] += f'; msToken={self.mstoken}'
+            else:
+                headers['Cookie'] = f'msToken={self.mstoken}'
+
             async with aiohttp.ClientSession() as session:
-                async with session.get(full_url, headers=self.headers, timeout=10) as response:
+                async with session.get(full_url, headers=headers, timeout=10) as response:
                     if response.status != 200:
                         logger.error(f"请求失败，状态码: {response.status}")
                         return None
@@ -1414,8 +1912,8 @@ def main():
     
     parser.add_argument(
         '-c', '--config',
-        default='config.yml',
-        help='配置文件路径 (默认: config.yml，自动兼容 config_simple.yml)'
+        default='config_downloader.yml',
+        help='配置文件路径 (默认: config_downloader.yml)'
     )
     
     parser.add_argument(

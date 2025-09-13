@@ -1,0 +1,109 @@
+#######################################
+# DouYinCommand.py 配置文件示例
+# 请复制此文件为 config_douyin.yml 并修改
+#######################################
+
+# ==================== 必需配置 ====================
+
+# 下载链接列表
+# 支持多种链接格式：
+# - 短链接: https://v.douyin.com/xxxxx/
+# - 视频链接: https://www.douyin.com/video/xxxxx
+# - 用户主页: https://www.douyin.com/user/xxxxx
+link:
+  - https://v.douyin.com/xxxxx/
+  # - https://www.douyin.com/video/1234567890123456789
+  # - https://www.douyin.com/user/MS4wLjABAAAAxxxxx
+
+# 下载保存路径
+# 支持相对路径和绝对路径
+path: ./Downloaded/
+
+# 下载线程数
+# 建议范围: 1-10，过高可能被限流
+thread: 5
+
+# ==================== 下载控制 ====================
+
+# 下载模式（主页链接时生效）
+# 可选值: post(作品), like(喜欢), music(音乐), mix(合集), allmix(所有合集)
+mode:
+  - post
+  # - like
+
+# 下载数量限制
+# 0 表示下载全部，正数表示限制数量
+number:
+  post: 0      # 作品数量
+  like: 0      # 喜欢数量
+  music: 0     # 音乐数量
+  mix: 0       # 单个合集数量
+  allmix: 0    # 所有合集数量
+
+# 增量下载设置
+# true: 只下载新增内容（基于数据库记录）
+# false: 重新下载所有内容
+increase:
+  post: false
+  like: false
+  music: false
+  mix: false
+  allmix: false
+
+# ==================== 下载内容设置 ====================
+
+# 下载内容控制
+music: true       # 是否下载背景音乐
+cover: true       # 是否下载封面图
+avatar: true      # 是否下载用户头像
+json: true        # 是否保存视频元数据JSON
+database: true    # 是否使用数据库记录（用于增量下载）
+folderstyle: true # 是否按文件夹分类组织文件
+
+# ==================== 时间过滤 ====================
+
+# 时间范围过滤（可选）
+# 格式: YYYY-MM-DD
+# 留空表示不限制
+# 特殊值: "now" 表示当前日期
+start_time: ''   # 开始时间（如: '2024-01-01'）
+end_time: ''     # 结束时间（如: '2024-12-31' 或 'now'）
+
+# ==================== Cookie 配置 ====================
+
+# Cookie 配置（两种方式，二选一）
+# Cookie可以提高下载成功率，特别是下载私密内容
+
+# 方式1: 直接粘贴整串 Cookie 字符串（优先级高）
+# 从浏览器开发者工具复制完整的Cookie字符串
+# cookie: "msToken=xxx; ttwid=xxx; sessionid=xxx; sid_guard=xxx; ..."
+
+# 方式2: 以键值对方式提供（更灵活）
+# 程序会自动将这些键值对组合成Cookie字符串
+# cookies:
+#   msToken: YOUR_MS_TOKEN_VALUE          # 必需，API认证令牌
+#   ttwid: YOUR_TTWID_VALUE               # 必需，设备标识
+#   sessionid: YOUR_SESSION_ID            # 登录后才有，用于私密内容
+#   sessionid_ss: YOUR_SESSION_ID_SS     # 登录后才有
+#   sid_guard: YOUR_SID_GUARD            # 登录后才有，会话保护
+#   sid_tt: YOUR_SID_TT                  # 登录后才有
+#   uid_tt: YOUR_UID_TT                  # 用户标识
+#   uid_tt_ss: YOUR_UID_TT_SS           # 用户标识
+#   odin_tt: YOUR_ODIN_TT                # 设备指纹
+#   passport_csrf_token: YOUR_TOKEN      # CSRF保护令牌
+
+# 获取Cookie的方法：
+# 1. 运行: python3 get_cookie.py (自动扫码登录，推荐)
+# 2. 运行: python3 manual_login_cookie.py (手动输入账号密码)
+# 3. 浏览器开发者工具：
+#    a. 打开抖音网页版并登录
+#    b. F12打开开发者工具
+#    c. Network标签 -> 刷新页面
+#    d. 找到任意请求 -> Headers -> Cookie
+#    e. 复制完整Cookie字符串
+
+# Cookie有效期说明：
+# - msToken: 约7天
+# - sessionid: 约30天（登录状态）
+# - ttwid: 约1年
+# 建议定期更新Cookie以保证下载成功率

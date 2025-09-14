@@ -2,716 +2,642 @@
 
 ![douyin-downloader](https://socialify.git.ci/jiji262/douyin-downloader/image?custom_description=%E6%8A%96%E9%9F%B3%E6%89%B9%E9%87%8F%E4%B8%8B%E8%BD%BD%E5%B7%A5%E5%85%B7%EF%BC%8C%E5%8E%BB%E6%B0%B4%E5%8D%B0%EF%BC%8C%E6%94%AF%E6%8C%81%E8%A7%86%E9%A2%91%E3%80%81%E5%9B%BE%E9%9B%86%E3%80%81%E5%90%88%E9%9B%86%E3%80%81%E9%9F%B3%E4%B9%90%28%E5%8E%9F%E5%A3%B0%29%E3%80%82%0A%E5%85%8D%E8%B4%B9%EF%BC%81%E5%85%8D%E8%B4%B9%EF%BC%81%E5%85%8D%E8%B4%B9%EF%BC%81&description=1&font=Jost&forks=1&logo=https%3A%2F%2Fraw.githubusercontent.com%2Fjiji262%2Fdouyin-downloader%2Frefs%2Fheads%2Fmain%2Fimg%2Flogo.png&name=1&owner=1&pattern=Circuit+Board&pulls=1&stargazers=1&theme=Light)
 
-一个功能强大的抖音内容批量下载工具，支持视频、图集、音乐、直播等多种内容类型的下载。提供两个版本：V1.0（稳定版）和 V2.0（增强版）。
+一个功能强大的抖音内容批量下载工具，支持视频、图集、音乐、直播等多种内容类型的下载。提供三个版本工具和一个独立的解析服务。
 
 ## 📋 目录
 
-- [快速开始](#-快速开始)
-- [版本说明](#-版本说明)
-- [V1.0 使用指南](#-v10-使用指南)
-- [V2.0 使用指南](#-v20-使用指南)
-- [Cookie 配置工具](#-cookie-配置工具)
-- [支持的链接类型](#-支持的链接类型)
-- [常见问题](#-常见问题)
-- [更新日志](#-更新日志)
+- [项目架构](#项目架构)
+- [快速开始](#快速开始)
+- [工具详细说明](#工具详细说明)
+- [使用步骤](#使用步骤)
+- [Cookie获取方法](#cookie获取方法)
+- [故障排除](#故障排除)
+- [开发说明](#开发说明)
 
-## ⚡ 快速开始
+## 🏗️ 项目架构
+
+```
+douyin-downloader/
+├── 下载器工具/
+│   ├── DouYinCommand.py      # V1: 原始版本（简单直接）
+│   ├── downloader_v2.py      # V2: 增强版（独立运行）
+│   └── downloader_v3.py      # V3: 最新版（配合解析服务）
+│
+├── 解析服务/
+│   └── parsing_service/      # Docker化的解析服务
+│       ├── app.py            # Flask主服务
+│       ├── strategies/       # 多种解析策略
+│       │   ├── api_strategy.py        # API + X-Bogus签名
+│       │   ├── playwright_strategy.py # Playwright浏览器自动化
+│       │   ├── selenium_strategy.py   # Selenium浏览器自动化
+│       │   └── requests_strategy.py   # 简单HTTP请求
+│       └── utils/           # 工具模块
+│           ├── cache_manager.py    # Redis缓存管理
+│           ├── proxy_manager.py    # 代理池管理
+│           └── metrics_collector.py # 性能指标收集
+│
+├── 辅助工具/
+│   ├── xbogus_generator.py   # X-Bogus签名生成
+│   ├── get_cookie.py         # Cookie提取工具
+│   └── test_*.py            # 测试脚本
+│
+└── 配置文件/
+    ├── docker-compose.yml    # Docker编排
+    ├── requirements.txt      # Python依赖
+    └── cookies.txt          # Cookie文件（需创建）
+```
+
+## 🚀 快速开始
 
 ### 环境要求
 
 - **Python 3.9+**
 - **操作系统**：Windows、macOS、Linux
+- **Docker**（V3版本需要）
 
-### 安装步骤
+### 方式1：最简单使用（V1版本）
 
-1. **克隆项目**
 ```bash
-git clone https://github.com/jiji262/douyin-downloader.git
-cd douyin-downloader
+# 安装基础依赖
+pip install requests
+
+# 下载单个视频
+python DouYinCommand.py https://v.douyin.com/xxxxx/
 ```
 
-2. **安装依赖**
+### 方式2：独立使用（V2版本）
+
 ```bash
-pip install -r requirements.txt
+# 安装依赖
+pip install requests aiohttp tqdm browser-cookie3
+
+# 下载视频
+python downloader_v2.py https://v.douyin.com/xxxxx/
+
+# 交互模式
+python downloader_v2.py -i
 ```
 
-3. **准备 Cookie**（首次使用必需）
-
-抖音下载需要有效的登录Cookie才能正常工作。您可以选择：
-- **V1.0**：需要手动配置Cookie到配置文件
-- **V2.0**：支持自动获取Cookie或从浏览器提取
-
-## 📦 版本说明
-
-### V1.0 (DouYinCommand.py) - 稳定版
-- ✅ **经过验证**：稳定可靠，经过大量测试
-- ✅ **简单易用**：配置文件驱动，使用简单
-- ✅ **功能完整**：支持所有内容类型下载
-- ✅ **单个视频下载**：完全正常工作
-- ⚠️ **需要手动配置**：需要手动获取和配置 Cookie
-
-### V2.0 (downloader.py) - 增强版
-- 🚀 **自动 Cookie 管理**：支持自动获取和刷新 Cookie
-- 🚀 **统一入口**：整合所有功能到单一脚本
-- 🚀 **异步架构**：性能更优，支持并发下载
-- 🚀 **智能重试**：自动重试和错误恢复
-- 🚀 **增量下载**：支持增量更新，避免重复下载
-- ⚠️ **单个视频下载**：目前 API 返回空响应（已知问题）
-- ✅ **用户主页下载**：完全正常工作
-
-## 🎯 V1.0 使用指南（稳定版）
-
-### 第一步：准备配置文件
+### 方式3：生产环境（V3版本 + 解析服务）⭐推荐
 
 ```bash
-# 复制示例配置文件
+# 1. 启动解析服务
+docker-compose up -d
+
+# 2. 使用下载器
+python downloader_v3.py https://v.douyin.com/xxxxx/
+```
+
+## 📖 工具详细说明
+
+### 1️⃣ DouYinCommand.py（V1 - 基础版）
+
+**特点**：
+- ✅ 无需配置，开箱即用
+- ✅ 代码简单，易于理解
+- ❌ 功能有限，成功率较低
+- ❌ 不支持批量下载
+
+**详细使用步骤**：
+
+#### 步骤1：准备配置文件
+
+```bash
+# 复制示例配置
 cp config_douyin_example.yml config_douyin.yml
 
 # 编辑配置文件
-nano config_douyin.yml  # 或使用任何文本编辑器
+vim config_douyin.yml
 ```
 
-### 第二步：配置文件详解
+#### 步骤2：配置Cookie
 
 ```yaml
-# ===== 下载链接配置 =====
-link:
-  - https://v.douyin.com/xxxxx/           # 短链接
-  - https://www.douyin.com/video/xxxxx    # 视频直链
-  - https://www.douyin.com/user/xxxxx     # 用户主页
-  - https://www.douyin.com/collection/xxx # 合集链接
-
-# ===== 保存路径配置 =====
-path: ./Downloaded/                       # 下载保存目录
-
-# ===== Cookie配置（必填）=====
+# config_douyin.yml
 cookies:
-  msToken: xxx                            # 必需
-  ttwid: xxx                              # 必需
-  odin_tt: xxx                            # 可选但推荐
-  passport_csrf_token: xxx                # 可选但推荐
-  sid_guard: xxx                          # 可选但推荐
-  sessionid: xxx                          # 登录状态标识
-
-# ===== 下载选项 =====
-music: true                               # 下载背景音乐
-cover: true                               # 下载视频封面
-avatar: true                              # 下载作者头像
-json: true                                # 保存元数据JSON
-
-# ===== 下载模式 =====
-mode:
-  - post                                  # 下载发布作品
-  # - like                                # 下载喜欢作品（需要账号权限）
-  # - mix                                 # 下载合集作品
-
-# ===== 数量限制 =====
-number:
-  post: 0                                 # 0表示下载全部
-  like: 20                                # 限制下载20个
-  allmix: 5                               # 下载5个合集
-  mix: 10                                 # 每个合集下载10个
-
-# ===== 性能设置 =====
-thread: 5                                 # 并发下载线程数
-retry: 3                                  # 失败重试次数
-timeout: 10                               # 请求超时时间（秒）
-
-# ===== 其他设置 =====
-database: true                            # 启用数据库记录
-proxy: null                               # 代理设置（可选）
+  msToken: xxx      # 必需
+  ttwid: xxx       # 必需
+  sessionid: xxx   # 登录状态（下载用户主页必需）
 ```
 
-### 第三步：获取Cookie
-
-#### 方法1：手动从浏览器获取
-1. 打开Chrome/Edge浏览器，访问 https://www.douyin.com
-2. 登录你的抖音账号
-3. 按F12打开开发者工具
-4. 切换到Network标签
-5. 刷新页面，找到任意请求
-6. 在Request Headers中找到Cookie
-7. 复制需要的cookie值到配置文件
-
-#### 方法2：使用辅助工具（如果有）
-```bash
-python get_cookie.py          # 自动扫码登录获取
-python manual_login_cookie.py # 手动输入账号密码
-```
-
-### 第四步：运行下载
+#### 步骤3：运行下载
 
 ```bash
-# 基本运行（使用config_douyin.yml）
+# 基本运行
 python DouYinCommand.py
 
 # 指定配置文件
 python DouYinCommand.py -c custom_config.yml
 
-# 命令行模式（交互式）
-python DouYinCommand.py --cmd
+# 命令行模式
+python DouYInCommand.py --cmd
 ```
 
-### 实际使用示例
+**适用场景**：
+- 临时下载几个视频
+- 测试URL是否有效
+- 学习代码结构
 
-#### 示例1：下载单个视频
-```yaml
-# config_douyin.yml
-link:
-  - https://v.douyin.com/iRN8bKvR/
-path: ./videos/
-cookies:
-  msToken: your_token_here
-  # ... 其他cookie
-```
+---
 
-#### 示例2：批量下载用户作品
-```yaml
-# config_douyin.yml
-link:
-  - https://www.douyin.com/user/MS4wLjABAAAA1234567890
-mode:
-  - post
-number:
-  post: 50  # 只下载最新50个作品
-```
+### 2️⃣ downloader_v2.py（V2 - 增强版）
 
-#### 示例3：下载多个合集
-```yaml
-# config_douyin.yml
-link:
-  - https://www.douyin.com/collection/7123456789
-  - https://www.douyin.com/collection/7987654321
-mode:
-  - mix
-number:
-  mix: 0  # 下载合集内全部作品
-```
+**特点**：
+- ✅ 支持自动提取浏览器Cookie
+- ✅ 批量下载功能
+- ✅ 交互模式友好
+- ✅ 独立运行，无需其他服务
+- ⭐ 中等成功率
 
-### 高级功能
+**详细使用步骤**：
 
-#### 增量下载（避免重复）
-```yaml
-increase:
-  post: true   # 只下载新发布的作品
-  like: false  # 重新下载所有喜欢的
-```
-
-#### 使用代理
-```yaml
-proxy: http://127.0.0.1:7890
-```
-
-#### 自定义命名规则
-```yaml
-naming: '{create}_{desc}'  # 时间_描述
-# 可用变量：{create}, {desc}, {id}, {author}
-```
-
-## 🚀 V2.0 使用指南（增强版）
-
-### 三种使用方式
-
-#### 方式1：命令行直接下载（最简单）
+#### 步骤1：安装依赖
 
 ```bash
-# 自动获取Cookie并下载用户主页
-python downloader.py --auto-cookie -u "https://www.douyin.com/user/xxxxx"
-
-# 使用浏览器Cookie下载（自动从Chrome提取）
-python downloader.py --cookies "browser:chrome" -u "https://v.douyin.com/xxxxx/"
-
-# 从Firefox提取Cookie
-python downloader.py --cookies "browser:firefox" -u "链接"
-
-# 指定保存路径和数量
-python downloader.py -u "链接" --path "./videos/" --number 20
-
-# 批量下载多个链接
-python downloader.py -u "链接1" "链接2" "链接3" --path "./batch/"
+pip install requests aiohttp tqdm browser-cookie3 rich
 ```
 
-#### 方式2：配置文件模式（批量任务）
+#### 步骤2：准备Cookie（可选但推荐）
 
 ```bash
-# 1. 创建配置文件
-cp config_downloader_example.yml config_downloader.yml
+# 方法A：自动从浏览器提取
+python downloader_v2.py --extract-cookies chrome
 
-# 2. 编辑配置文件（见下方详细说明）
-
-# 3. 运行
-python downloader.py --config
+# 方法B：手动创建cookies.txt
+# 1. 登录抖音网页版
+# 2. 使用浏览器插件导出Cookie
+# 3. 保存为cookies.txt（Netscape格式）
 ```
 
-#### 方式3：混合模式（配置+命令行）
+#### 步骤3：使用下载器
 
 ```bash
-# 使用配置文件但覆盖某些参数
-python downloader.py --config --path "./custom/" --number 10
+# 单个视频下载
+python downloader_v2.py https://v.douyin.com/xxxxx/
+
+# 批量下载（多个URL）
+python downloader_v2.py url1 url2 url3
+
+# 交互模式（推荐新手）
+python downloader_v2.py -i
+# 然后按提示操作：
+# - 输入单个URL下载
+# - 输入多个URL批量下载（空格分隔）
+# - 输入 'stats' 查看统计
+# - 输入 'q' 退出
+
+# 高级选项
+python downloader_v2.py \
+  -c cookies.txt \       # 使用Cookie文件
+  -o downloads \         # 指定输出目录
+  -m 10 \               # 设置并发数
+  --proxy \             # 使用代理
+  url1 url2
 ```
 
-### 配置文件详解
-
-```yaml
-# ===== 下载目标 =====
-link:
-  - https://v.douyin.com/xxxxx/           # 短链接
-  - https://www.douyin.com/user/xxxxx     # 用户主页
-  - https://www.douyin.com/video/xxxxx    # 视频直链
-  - https://www.douyin.com/collection/xxx # 合集
-
-# ===== Cookie配置（三选一）=====
-# 方式1：自动获取（Playwright）
-auto_cookie: true
-
-# 方式2：浏览器提取（yt-dlp方式）
-cookies: "browser:chrome"  # 或 firefox, edge, safari
-
-# 方式3：手动配置
-cookies:
-  msToken: xxx
-  ttwid: xxx
-  sessionid: xxx
-
-# ===== 下载设置 =====
-path: ./Downloaded/                       # 保存路径
-mode:
-  - post                                  # 下载发布作品
-  - like                                  # 下载喜欢作品
-  - mix                                   # 下载合集
-
-# ===== 数量控制 =====
-number:
-  post: 0                                 # 0=全部，数字=限制数量
-  like: 50                                # 最多下载50个喜欢
-  allmix: 10                              # 下载10个合集
-  mix: 20                                 # 每个合集20个视频
-
-# ===== 增量更新 =====
-increase:
-  post: true                              # 只下载新发布的
-  like: false                             # 重新下载所有
-  mix: true                               # 合集增量更新
-
-# ===== 下载内容 =====
-music: true                               # 背景音乐
-cover: true                               # 视频封面
-avatar: true                              # 作者头像
-json: true                                # 元数据
-comment: true                             # 评论数据
-
-# ===== 性能优化 =====
-thread: 10                                # 并发线程数
-retry: 5                                  # 重试次数
-timeout: 15                               # 超时时间
-chunk_size: 1024000                       # 下载块大小
-
-# ===== 高级设置 =====
-database: true                            # 数据库记录
-proxy: null                               # 代理设置
-headless: false                           # 无头浏览器模式
-log_level: INFO                           # 日志级别
-```
-
-### 实际使用案例
-
-#### 案例1：首次使用，自动配置
-```bash
-# 自动打开浏览器，扫码登录，然后下载
-python downloader.py --auto-cookie -u "https://www.douyin.com/user/MS4wLjAB"
-```
-
-#### 案例2：日常使用，浏览器Cookie
-```bash
-# 直接从已登录的Chrome提取Cookie
-python downloader.py --cookies "browser:chrome" \
-  -u "https://v.douyin.com/iRN8bKvR/" \
-  --path "./today/"
-```
-
-#### 案例3：批量下载任务
-```yaml
-# config_downloader.yml
-link:
-  - https://www.douyin.com/user/user1
-  - https://www.douyin.com/user/user2
-  - https://www.douyin.com/user/user3
-cookies: "browser:chrome"
-mode: [post]
-number:
-  post: 100  # 每个用户下载100个
-increase:
-  post: true  # 增量下载
-```
+#### 步骤4：处理不同类型的URL
 
 ```bash
-python downloader.py --config
+# 短链接
+python downloader_v2.py https://v.douyin.com/xxxxx/
+
+# 视频链接
+python downloader_v2.py https://www.douyin.com/video/7549035040701844779
+
+# 用户主页（下载该用户的视频）
+python downloader_v2.py https://www.douyin.com/user/MS4wLjABAAAAxxxxx
+
+# 合集链接
+python downloader_v2.py https://www.douyin.com/collection/xxxxx
+
+# 音乐链接（下载使用该音乐的视频）
+python downloader_v2.py https://www.douyin.com/music/xxxxx
 ```
 
-#### 案例4：定时任务脚本
+**适用场景**：
+- 日常批量下载
+- 不想配置Docker
+- 需要快速使用
+
+---
+
+### 3️⃣ downloader_v3.py + 解析服务（V3 - 生产版）⭐最推荐
+
+**特点**：
+- ✅ 最高成功率（多策略自动切换）
+- ✅ Redis缓存（避免重复解析）
+- ✅ 支持监控和统计
+- ✅ Docker化部署
+- ✅ 可扩展性强
+- ⭐ 需要运行解析服务
+
+**详细使用步骤**：
+
+#### 步骤1：安装Docker（如未安装）
+
+```bash
+# macOS
+brew install docker docker-compose
+
+# Ubuntu/Debian
+sudo apt-get install docker.io docker-compose
+
+# 验证安装
+docker --version
+docker-compose --version
+```
+
+#### 步骤2：配置解析服务
+
+```bash
+# 1. 复制环境变量配置
+cp parsing_service/.env.example parsing_service/.env
+
+# 2. 编辑配置（可选）
+vim parsing_service/.env
+# 主要配置项：
+# - ENABLE_PLAYWRIGHT=true  # 启用Playwright策略
+# - CACHE_TTL=3600          # 缓存时间
+# - MAX_WORKERS=10          # 并发数
+```
+
+#### 步骤3：启动解析服务
+
+```bash
+# 启动所有服务（Redis + 解析服务 + Nginx）
+docker-compose up -d
+
+# 查看服务状态
+docker-compose ps
+
+# 查看日志
+docker-compose logs -f parsing-service
+
+# 等待服务就绪（约30秒）
+curl http://localhost:5000/health
+```
+
+#### 步骤4：使用下载器
+
+```bash
+# 安装客户端依赖
+pip install requests aiohttp tqdm
+
+# 基础使用
+python downloader_v3.py https://v.douyin.com/xxxxx/
+
+# 批量下载
+python downloader_v3.py url1 url2 url3
+
+# 交互模式
+python downloader_v3.py -i
+
+# 高级选项
+python downloader_v3.py \
+  -s http://localhost:5000 \  # 解析服务地址
+  -c cookies.txt \            # Cookie文件
+  -o downloads \              # 输出目录
+  -m 10 \                    # 并发数
+  --proxy \                  # 使用代理
+  --force \                  # 强制刷新缓存
+  url1 url2
+```
+
+#### 步骤5：监控和管理
+
+```bash
+# 查看统计信息
+curl http://localhost:5000/stats | jq
+
+# 查看Prometheus指标
+curl http://localhost:5000/metrics
+
+# 访问Grafana监控面板
+open http://localhost:3000
+# 默认账号：admin/admin
+
+# 清除缓存
+curl -X POST http://localhost:5000/clear_cache
+
+# 停止服务
+docker-compose down
+
+# 停止并删除数据
+docker-compose down -v
+```
+
+**适用场景**：
+- 大量视频下载
+- 需要高成功率
+- 长期运行的服务
+- 团队共享使用
+
+---
+
+## 🔄 解析服务架构说明
+
+V3版本使用独立的解析服务，提供多策略自动切换：
+
+```
+用户请求
+    ↓
+Flask API服务
+    ↓
+策略管理器（按权重排序）
+    ↓
+┌──────────────────────────────────────┐
+│  1. API策略（X-Bogus签名）            │ ← 最快但可能被拦截
+│  2. Playwright策略（浏览器自动化）     │ ← 成功率高
+│  3. Selenium策略（备用浏览器）         │ ← 备用方案
+│  4. Requests策略（HTML解析）          │ ← 最后尝试
+└──────────────────────────────────────┘
+    ↓
+Redis缓存（避免重复解析）
+    ↓
+返回视频信息
+```
+
+### 策略详细说明
+
+| 策略 | 优先级 | 成功率 | 速度 | 说明 |
+|-----|--------|--------|------|------|
+| API + X-Bogus | 1 | 中 | 快 | 使用签名算法直接调用API |
+| Playwright | 2 | 高 | 慢 | 模拟真实浏览器行为 |
+| Selenium | 3 | 高 | 慢 | 备用浏览器自动化 |
+| Requests | 4 | 低 | 快 | 简单HTTP请求解析HTML |
+
+---
+
+## 🍪 Cookie获取方法
+
+Cookie可以显著提高下载成功率，以下是获取方法：
+
+### 方法1：浏览器插件（推荐）
+
+1. **安装Cookie编辑器插件**
+   - Chrome: EditThisCookie 或 Cookie-Editor
+   - Firefox: Cookie Quick Manager
+
+2. **登录抖音网页版**
+   - 访问 https://www.douyin.com
+   - 使用手机扫码登录
+
+3. **导出Cookie**
+   - 点击插件图标
+   - 选择"导出" → "Netscape格式"
+   - 保存为 `cookies.txt`
+
+### 方法2：浏览器开发者工具
+
+1. 登录抖音网页版
+2. 按F12打开开发者工具
+3. 切换到Network标签
+4. 刷新页面
+5. 找到任意请求 → Headers → Cookie
+6. 复制整个Cookie字符串
+
+### 方法3：自动提取（仅V2支持）
+
+```bash
+# 从Chrome提取
+python downloader_v2.py --extract-cookies chrome
+
+# 从Edge提取
+python downloader_v2.py --extract-cookies edge
+
+# 从Firefox提取
+python downloader_v2.py --extract-cookies firefox
+```
+
+### 方法4：使用辅助工具
+
+```bash
+# 使用Cookie提取工具
+python get_cookie.py
+
+# 手动登录获取Cookie
+python manual_login_cookie.py
+```
+
+### Cookie字段说明
+
+| 字段 | 必需 | 说明 |
+|------|------|------|
+| msToken | ✅ | API访问令牌 |
+| ttwid | ✅ | 设备标识 |
+| sessionid | ⚠️ | 登录状态（下载用户主页必需） |
+| odin_tt | ❌ | 提高成功率 |
+| passport_csrf_token | ❌ | CSRF保护 |
+
+---
+
+## 🔧 故障排除
+
+### 问题1：解析失败/下载失败
+
+**可能原因**：
+- Cookie过期或无效
+- 网络问题
+- 抖音反爬虫升级
+
+**解决方案**：
+```bash
+# 1. 更新Cookie
+python get_cookie.py
+
+# 2. 使用V3版本（成功率更高）
+docker-compose up -d
+python downloader_v3.py URL
+
+# 3. 启用代理
+python downloader_v3.py --proxy URL
+
+# 4. 强制刷新缓存
+python downloader_v3.py --force URL
+```
+
+### 问题2：Docker服务启动失败
+
+```bash
+# 检查端口占用
+lsof -i:5000
+lsof -i:6379
+
+# 查看错误日志
+docker-compose logs
+
+# 重新构建
+docker-compose build --no-cache
+docker-compose up -d
+```
+
+### 问题3：视频无法播放
+
+**可能原因**：
+- 下载不完整
+- 视频格式问题
+
+**解决方案**：
+```bash
+# 重新下载
+python downloader_v3.py --force URL
+
+# 检查文件完整性
+ffmpeg -i video.mp4 -f null -
+```
+
+### 问题4："No module named 'xxx'"
+
+```bash
+# 安装缺失的依赖
+pip install -r requirements.txt
+
+# 或单独安装
+pip install requests aiohttp tqdm
+```
+
+---
+
+## 🛠️ 开发说明
+
+### 项目文件说明
+
+| 文件 | 用途 | 状态 |
+|------|------|------|
+| DouYinCommand.py | V1原始版本 | ✅ 保留 |
+| downloader_v2.py | V2增强版 | ✅ 使用 |
+| downloader_v3.py | V3客户端 | ✅ 推荐 |
+| parsing_service/ | 解析服务 | ✅ 核心 |
+| xbogus_generator.py | 签名生成 | ✅ 依赖 |
+| get_cookie.py | Cookie工具 | ✅ 辅助 |
+| test_*.py | 测试脚本 | ✅ 测试 |
+| downloader.py | 过渡版本 | ❌ 可删除 |
+
+### 添加新的解析策略
+
+1. **创建策略文件**
+```python
+# parsing_service/strategies/new_strategy.py
+from .base_strategy import BaseStrategy
+
+class NewStrategy(BaseStrategy):
+    async def parse(self, url: str, options: Dict = None) -> Dict:
+        # 实现解析逻辑
+        pass
+```
+
+2. **注册策略**
+```python
+# parsing_service/app.py
+strategies.append({
+    'name': 'new_strategy',
+    'handler': NewStrategy(),
+    'priority': 5,
+    'enabled': True
+})
+```
+
+### 运行测试
+
+```bash
+# 测试V2版本
+python test_downloader_v2.py
+
+# 测试解析服务
+python test_parsing_service.py
+
+# 测试签名算法
+python test_with_signature.py
+```
+
+---
+
+## 📊 版本对比
+
+| 功能 | V1 | V2 | V3 |
+|-----|----|----|-----|
+| 单视频下载 | ✅ | ✅ | ✅ |
+| 批量下载 | ❌ | ✅ | ✅ |
+| Cookie管理 | ❌ | ✅ | ✅ |
+| 浏览器Cookie提取 | ❌ | ✅ | ❌ |
+| 交互模式 | ❌ | ✅ | ✅ |
+| 多策略解析 | ❌ | ❌ | ✅ |
+| 缓存支持 | ❌ | ❌ | ✅ |
+| Docker部署 | ❌ | ❌ | ✅ |
+| 监控统计 | ❌ | ⭕ | ✅ |
+| 成功率 | 低 | 中 | 高 |
+| 使用难度 | 简单 | 简单 | 中等 |
+
+---
+
+## 📝 实际使用案例
+
+### 案例1：下载单个视频
+
+```bash
+# V1版本
+python DouYinCommand.py
+
+# V2版本
+python downloader_v2.py https://v.douyin.com/xxxxx/
+
+# V3版本（需先启动服务）
+docker-compose up -d
+python downloader_v3.py https://v.douyin.com/xxxxx/
+```
+
+### 案例2：批量下载用户视频
+
+```bash
+# V2版本 - 交互模式
+python downloader_v2.py -i
+> https://www.douyin.com/user/xxxxx
+> stats  # 查看进度
+
+# V3版本 - 命令行模式
+python downloader_v3.py \
+  https://www.douyin.com/user/xxxxx \
+  -o ./user_videos \
+  -m 10
+```
+
+### 案例3：定时任务脚本
+
 ```bash
 #!/bin/bash
 # daily_download.sh
 cd /path/to/douyin-downloader
-python downloader.py --config --cookies "browser:chrome"
+
+# 启动解析服务（如果未运行）
+docker-compose up -d
+
+# 等待服务就绪
+sleep 10
+
+# 下载指定用户的新视频
+python downloader_v3.py \
+  https://www.douyin.com/user/xxxxx \
+  -c cookies.txt \
+  --force
+
+# 查看统计
+curl http://localhost:5000/stats
 ```
-
-### 高级功能
-
-#### 1. 断点续传
-V2.0自动支持断点续传，中断后重新运行会从上次位置继续。
-
-#### 2. 智能去重
-使用数据库记录已下载内容，避免重复下载。
-
-#### 3. 自适应限速
-自动检测并适应抖音的访问限制。
-
-#### 4. 并发控制
-```yaml
-thread: 5     # 保守设置
-thread: 10    # 推荐设置
-thread: 20    # 激进设置（可能触发限制）
-```
-
-#### 5. 代理支持
-```yaml
-proxy: http://127.0.0.1:7890      # HTTP代理
-proxy: socks5://127.0.0.1:1080    # SOCKS5代理
-```
-
-### 命令行参数完整列表
-
-```bash
-python downloader.py [选项]
-
-基本选项：
-  -h, --help                显示帮助信息
-  -u, --url URL            下载链接（可多个）
-  -p, --path PATH          保存路径
-  -c, --config             使用配置文件
-
-Cookie选项：
-  --auto-cookie            自动获取Cookie（Playwright）
-  --cookies COOKIES        指定Cookie来源
-    示例：
-    --cookies "browser:chrome"     从Chrome提取
-    --cookies "msToken=xxx;..."    直接提供Cookie字符串
-    --cookies "cookies.txt"        从文件读取
-
-下载选项：
-  --mode MODE              下载模式（post/like/mix）
-  --number NUMBER          下载数量限制
-  --increase              启用增量下载
-  --no-music              不下载音乐
-  --no-cover              不下载封面
-  --no-avatar             不下载头像
-
-性能选项：
-  --thread N              并发线程数
-  --retry N               重试次数
-  --timeout N             超时时间（秒）
-
-其他选项：
-  --proxy PROXY           代理服务器
-  --log-level LEVEL       日志级别（DEBUG/INFO/WARNING/ERROR）
-  --headless              无头浏览器模式
-  --database              启用数据库记录
-```
-
-## 🍪 Cookie 配置工具
-
-### Cookie获取方式总览
-
-| 方式 | V1.0支持 | V2.0支持 | 难度 | 推荐度 |
-|------|---------|---------|------|--------|
-| V2.0内置自动获取 | ❌ | ✅ | 简单 | ⭐⭐⭐⭐⭐ |
-| V2.0浏览器提取 | ❌ | ✅ | 简单 | ⭐⭐⭐⭐ |
-| 手动复制Cookie | ✅ | ✅ | 中等 | ⭐⭐⭐ |
-| 辅助工具获取 | ✅ | ✅ | 简单 | ⭐⭐⭐⭐ |
-
-### 方法一：V2.0内置自动获取（最推荐）
-
-仅适用于V2.0，无需额外工具：
-
-```bash
-# 方式1：使用Playwright自动登录
-python downloader.py --auto-cookie -u "下载链接"
-# 会自动打开浏览器，扫码登录后自动保存Cookie
-
-# 方式2：从已登录的浏览器提取
-python downloader.py --cookies "browser:chrome" -u "下载链接"
-# 支持：chrome, firefox, edge, safari, brave
-```
-
-### 方法二：手动从浏览器获取
-
-适用于V1.0和V2.0：
-
-1. **打开抖音网页版**
-   - 访问 https://www.douyin.com
-   - 登录你的账号
-
-2. **获取Cookie**
-   - 按F12打开开发者工具
-   - 切换到Network标签
-   - 刷新页面
-   - 找到任意请求，查看Request Headers
-   - 复制Cookie字段
-
-3. **配置到程序**
-
-   **V1.0配置方式**：
-   ```yaml
-   # config_douyin.yml
-   cookies:
-     msToken: 你的msToken值
-     ttwid: 你的ttwid值
-     sessionid: 你的sessionid值
-   ```
-
-   **V2.0配置方式**：
-   ```yaml
-   # config_downloader.yml
-   cookies:
-     msToken: 你的msToken值
-     ttwid: 你的ttwid值
-     sessionid: 你的sessionid值
-   ```
-
-   或命令行：
-   ```bash
-   python downloader.py --cookies "msToken=xxx;ttwid=xxx" -u "链接"
-   ```
-
-### 方法三：使用辅助工具（如果存在）
-
-项目可能包含以下辅助工具：
-
-```bash
-# 扫码登录获取
-python get_cookie.py
-
-# 账号密码登录
-python manual_login_cookie.py
-
-# 简单Cookie获取器
-python simple_cookie_getter.py
-```
-
-### Cookie有效性说明
-
-#### 必需的Cookie字段
-- **msToken**：必需，用于API访问
-- **ttwid**：必需，设备标识
-- **sessionid**：登录状态，下载用户主页时必需
-
-#### 可选但推荐的字段
-- **odin_tt**：提高成功率
-- **passport_csrf_token**：防CSRF令牌
-- **sid_guard**：会话保护
-
-#### Cookie过期处理
-- V1.0：需要手动更新Cookie
-- V2.0：使用`--auto-cookie`可自动刷新
-
-### 常见Cookie问题
-
-| 问题 | 原因 | 解决方案 |
-|------|------|----------|
-| “Cookie无效” | Cookie过期或不完整 | 重新获取完整Cookie |
-| “无法下载用户主页” | 缺少sessionid | 登录后获取sessionid |
-| “API返回空” | msToken失效 | 使用V2.0自动获取 |
-| “被风控限制” | 访问过于频繁 | 减少并发数，使用代理 |
-
-## 📋 支持的链接类型
-
-### 🎬 视频内容
-- **单个视频分享链接**：`https://v.douyin.com/xxxxx/`
-- **单个视频直链**：`https://www.douyin.com/video/xxxxx`
-- **图集作品**：`https://www.douyin.com/note/xxxxx`
-
-### 👤 用户内容
-- **用户主页**：`https://www.douyin.com/user/xxxxx`
-  - 支持下载用户发布的所有作品
-  - 支持下载用户喜欢的作品（需要权限）
-
-### 📚 合集内容
-- **用户合集**：`https://www.douyin.com/collection/xxxxx`
-- **音乐合集**：`https://www.douyin.com/music/xxxxx`
-
-### 🔴 直播内容
-- **直播间**：`https://live.douyin.com/xxxxx`
-
-## 🔧 常见问题
-
-### 下载问题
-
-#### Q: V1.0和V2.0该选择哪个？
-**A**:
-- **首次使用**：推荐V2.0，支持自动获取Cookie
-- **稳定性要求高**：使用V1.0，经过大量测试
-- **单个视频下载**：V1.0更稳定
-- **批量下载**：V2.0效率更高
-
-#### Q: 为什么下载失败？
-**A**: 常见原因及解决方案：
-
-| 错误提示 | 原因 | 解决方案 |
-|---------|------|----------|
-| Cookie无效 | Cookie过期或不完整 | 重新获取Cookie |
-| API返回空 | 单视频API问题 | 使用用户主页下载 |
-| 网络超时 | 网络不稳定 | 检查网络或使用代理 |
-| 权限不足 | 缺少sessionid | 登录后获取完整Cookie |
-| 风控限制 | 访问过于频繁 | 减少并发数，增加延迟 |
-
-#### Q: 如何提高下载速度？
-**A**:
-```yaml
-# 优化配置
-thread: 10       # 增加并发数（默认5）
-chunk_size: 2048000  # 增大块大小
-timeout: 20      # 增加超时时间
-```
-
-### Cookie问题
-
-#### Q: Cookie多久过期？
-**A**:
-- 通常有1-7天有效期
-- V2.0使用`--auto-cookie`可自动刷新
-- 建议定期更新Cookie
-
-#### Q: 怎么判断Cookie是否有效？
-**A**:
-- 看是否能正常获取用户信息
-- 出现"Cookie无效"提示时需更新
-- V2.0会自动检测并提示
-
-### 功能问题
-
-#### Q: 支持哪些内容类型？
-**A**:
-- ✅ 视频作品（MP4无水印）
-- ✅ 图集作品（JPG高清）
-- ✅ 背景音乐（MP3）
-- ✅ 作者头像
-- ✅ 视频封面
-- ✅ 元数据（JSON）
-- ✅ 评论数据（V2.0）
-- ⚠️ 直播录制（开发中）
-
-#### Q: 如何批量下载？
-**A**:
-
-**V1.0批量下载**：
-```yaml
-# config_douyin.yml
-link:
-  - 链接1
-  - 链接2
-  - 链接3
-```
-
-**V2.0批量下载**：
-```bash
-# 命令行方式
-python downloader.py -u "链接1" "链接2" "链接3"
-
-# 配置文件方式
-python downloader.py --config
-```
-
-#### Q: 如何只下载最新内容？
-**A**: 使用增量下载功能：
-```yaml
-increase:
-  post: true  # 只下载新发布的
-```
-
-### 故障排除
-
-#### 错误："No module named 'xxx'"
-```bash
-# 安装缺失的依赖
-pip install -r requirements.txt
-```
-
-#### 错误："Playwright not installed"
-```bash
-# 安装Playwright和浏览器
-pip install playwright
-playwright install chromium
-```
-
-#### 错误："无法连接到抖音"
-- 检查网络连接
-- 尝试使用代理
-- 检查是否被风控
-
-#### 错误："文件保存失败"
-- 检查磁盘空间
-- 检查路径权限
-- 确保路径存在
-
-### 性能优化建议
-
-| 场景 | 推荐配置 | 说明 |
-|------|---------|------|
-| 少量下载 | thread: 3-5 | 稳定不被限制 |
-| 批量下载 | thread: 8-10 | 平衡速度和稳定 |
-| 大量下载 | thread: 5 + 代理 | 避免风控 |
-| 增量更新 | increase: true | 节省时间和流量 |
-
-## 📝 更新日志
-
-### V2.0 (2025-08)
-- ✅ **统一入口**：整合所有功能到 `downloader.py`
-- ✅ **自动 Cookie 管理**：支持自动获取和刷新
-- ✅ **异步架构**：性能优化，支持并发下载
-- ✅ **智能重试**：自动重试和错误恢复
-- ✅ **增量下载**：支持增量更新
-- ✅ **用户主页下载**：完全正常工作
-- ⚠️ **单个视频下载**：API 返回空响应（已知问题）
-
-### V1.0 (2024-12)
-- ✅ **稳定可靠**：经过大量测试验证
-- ✅ **功能完整**：支持所有内容类型
-- ✅ **单个视频下载**：完全正常工作
-- ✅ **配置文件驱动**：简单易用
-- ✅ **数据库支持**：记录下载历史
-
-## ⚖️ 法律声明
-
-- 本项目仅供**学习交流**使用
-- 请遵守相关法律法规和平台服务条款
-- 不得用于商业用途或侵犯他人权益
-- 下载内容请尊重原作者版权
-
-## 🤝 贡献指南
-
-欢迎提交 Issue 和 Pull Request！
-
-### 报告问题
-- 使用 [Issues](https://github.com/jiji262/douyin-downloader/issues) 报告 bug
-- 请提供详细的错误信息和复现步骤
-
-### 功能建议
-- 在 Issues 中提出新功能建议
-- 详细描述功能需求和使用场景
-
-## 📄 许可证
-
-本项目采用 [MIT License](LICENSE) 开源许可证。
 
 ---
 
-<div align="center">
+## ⚖️ 注意事项
 
-**如果这个项目对你有帮助，请给个 ⭐ Star 支持一下！**
+1. **合理使用**：仅供学习交流，请勿用于商业用途
+2. **频率控制**：避免频繁请求，建议间隔1-2秒
+3. **Cookie更新**：Cookie会过期，需要定期更新
+4. **资源占用**：V3版本需要较多系统资源（Docker）
+5. **网络要求**：确保网络稳定，必要时使用代理
 
-[🐛 报告问题](https://github.com/jiji262/douyin-downloader/issues) • [💡 功能建议](https://github.com/jiji262/douyin-downloader/issues) • [📖 查看文档](https://github.com/jiji262/douyin-downloader/wiki)
+## 🤝 贡献
 
-Made with ❤️ by [jiji262](https://github.com/jiji262)
+欢迎提交Issue和Pull Request！
 
-</div>
+## 📄 许可
+
+MIT License

@@ -46,16 +46,20 @@ from apiproxy.douyin.auth.cookie_manager import AutoCookieManager
 from apiproxy.douyin.auth.signature_generator import get_x_bogus, get_a_bogus
 from apiproxy.douyin.database import DataBase
 
-# 配置日志
+# 配置日志 - 只记录到文件，不输出到控制台
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('downloader.log', encoding='utf-8'),
-        logging.StreamHandler()
+        logging.FileHandler('downloader.log', encoding='utf-8')
     ]
 )
 logger = logging.getLogger(__name__)
+
+# 控制台日志级别设置为WARNING，减少干扰
+for handler in logging.root.handlers:
+    if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
+        handler.setLevel(logging.WARNING)
 
 # Rich console
 console = Console()
@@ -334,13 +338,100 @@ class UnifiedDownloader:
         """解析短链接"""
         if 'v.douyin.com' in url:
             try:
-                # 使用同步请求获取重定向
-                response = requests.get(url, headers=self.headers, allow_redirects=True, timeout=10)
+                # 使用更完整的请求头模拟浏览器
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'Cache-Control': 'no-cache',
+                    'Pragma': 'no-cache',
+                    'Sec-Ch-Ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+                    'Sec-Ch-Ua-Mobile': '?0',
+                    'Sec-Ch-Ua-Platform': '"macOS"',
+                    'Sec-Fetch-Dest': 'document',
+                    'Sec-Fetch-Mode': 'navigate',
+                    'Sec-Fetch-Site': 'none',
+                    'Sec-Fetch-User': '?1',
+                    'Upgrade-Insecure-Requests': '1'
+                }
+
+                # 获取初次重定向
+                session = requests.Session()
+                response = session.get(url, headers=headers, allow_redirects=False, timeout=10)
+
+                # 处理重定向链
+                redirect_count = 0
+                max_redirects = 5
+                current_url = url
+
+                while redirect_count < max_redirects:
+                    if response.status_code in [301, 302, 303, 307, 308]:
+                        location = response.headers.get('Location', '')
+                        if location:
+                            # 处理相对路径
+                            if location.startswith('/'):
+                                parsed = urlparse(current_url)
+                                location = f"{parsed.scheme}://{parsed.netloc}{location}"
+                            elif not location.startswith('http'):
+                                parsed = urlparse(current_url)
+                                location = f"{parsed.scheme}://{parsed.netloc}/{location}"
+
+                            current_url = location
+                            logger.debug(f"重定向 {redirect_count + 1}: {location}")
+
+                            # 检查是否包含视频ID
+                            if '/video/' in location or '/note/' in location or 'modal_id=' in location:
+                                logger.info(f"解析短链接成功: {url} -> {location}")
+                                return location
+
+                            # 继续跟随重定向
+                            response = session.get(location, headers=headers, allow_redirects=False, timeout=10)
+                            redirect_count += 1
+                        else:
+                            break
+                    else:
+                        # 非重定向状态，检查最终URL
+                        if '/video/' in current_url or '/note/' in current_url:
+                            logger.info(f"解析短链接成功: {url} -> {current_url}")
+                            return current_url
+                        break
+
+                # 如果上述方法失败，尝试直接访问并解析响应内容
+                response = session.get(url, headers=headers, allow_redirects=True, timeout=10)
                 final_url = response.url
-                logger.info(f"解析短链接: {url} -> {final_url}")
-                return final_url
+
+                # 从响应内容中提取视频ID
+                if response.text:
+                    import re
+                    # 尝试从页面中提取视频ID
+                    video_id_match = re.search(r'/video/(\d+)', response.text)
+                    if video_id_match:
+                        video_id = video_id_match.group(1)
+                        video_url = f"https://www.douyin.com/video/{video_id}"
+                        logger.info(f"从页面内容提取视频ID: {url} -> {video_url}")
+                        return video_url
+
+                    # 尝试从 meta 标签中提取
+                    canonical_match = re.search(r'<link[^>]+rel=["\']canonical["\'][^>]+href=["\']([^"\']+)["\']', response.text)
+                    if canonical_match:
+                        canonical_url = canonical_match.group(1)
+                        if '/video/' in canonical_url or '/note/' in canonical_url:
+                            logger.info(f"从 canonical 标签提取: {url} -> {canonical_url}")
+                            return canonical_url
+
+                # 最后的备用：如果最终URL看起来有效
+                if final_url and 'douyin.com' in final_url and final_url != 'https://www.douyin.com':
+                    logger.info(f"解析短链接: {url} -> {final_url}")
+                    return final_url
+
+                logger.warning(f"解析短链接失败，返回原始URL: {url}")
+                return url
+
             except Exception as e:
                 logger.warning(f"解析短链接失败: {e}")
+                import traceback
+                traceback.print_exc()
         return url
     
     def extract_id_from_url(self, url: str, content_type: ContentType = None) -> Optional[str]:
@@ -468,59 +559,61 @@ class UnifiedDownloader:
         except Exception:
             pass
     
-    async def download_single_video(self, url: str, progress=None) -> bool:
+    async def download_single_video(self, url: str, progress=None, task_id=None) -> bool:
         """下载单个视频/图文"""
         try:
             # 解析短链接
             url = await self.resolve_short_url(url)
-            
+
             # 提取ID
             video_id = self.extract_id_from_url(url, ContentType.VIDEO)
             if not video_id:
                 logger.error(f"无法从URL提取ID: {url}")
                 return False
-            
+
             # 如果没有提取到视频ID，尝试作为视频ID直接使用
             if not video_id and '/user/' not in url:
                 # 可能短链接直接包含了视频ID
                 video_id = url.split('/')[-2] if url.endswith('/') else url.split('/')[-1]
-                logger.info(f"尝试从短链接路径提取ID: {video_id}")
-            
+                logger.debug(f"尝试从短链接路径提取ID: {video_id}")
+
             if not video_id:
                 logger.error(f"无法从URL提取视频ID: {url}")
                 return False
-            
+
             # 限速
             await self.rate_limiter.acquire()
-            
+
             # 获取视频信息
-            if progress:
-                progress.update(task_id=progress.task_ids[-1], description="获取视频信息...")
-            
+            if progress and task_id is not None:
+                progress.update(task_id, description="[yellow]获取视频信息...[/yellow]", completed=20)
+
             video_info = await self.retry_manager.execute_with_retry(
                 self._fetch_video_info, video_id
             )
-            
+
             if not video_info:
                 logger.error(f"无法获取视频信息: {video_id}")
                 self.stats.failed += 1
                 return False
-            
+
             # 下载视频文件
-            if progress:
-                progress.update(task_id=progress.task_ids[-1], description="下载视频文件...")
-            
-            success = await self._download_media_files(video_info, progress)
-            
+            if progress and task_id is not None:
+                desc = video_info.get('desc', '无标题')[:30]
+                media_type = '图文' if video_info.get('images') else '视频'
+                progress.update(task_id, description=f"[cyan]下载{media_type}: {desc}[/cyan]", completed=40)
+
+            success = await self._download_media_files(video_info, progress, task_id)
+
             if success:
                 self.stats.success += 1
-                logger.info(f"✅ 下载成功: {url}")
+                logger.debug(f"下载成功: {url}")
             else:
                 self.stats.failed += 1
-                logger.error(f"❌ 下载失败: {url}")
-            
+                logger.error(f"下载失败: {url}")
+
             return success
-            
+
         except Exception as e:
             logger.error(f"下载视频异常 {url}: {e}")
             self.stats.failed += 1
@@ -970,12 +1063,12 @@ class UnifiedDownloader:
 
         return enhanced_endpoints
 
-    async def _download_media_files(self, video_info: Dict, progress=None) -> bool:
+    async def _download_media_files(self, video_info: Dict, progress=None, task_id=None) -> bool:
         """下载媒体文件"""
         try:
             # 判断类型
             is_image = bool(video_info.get('images'))
-            
+
             # 构建保存路径
             author_name = video_info.get('author', {}).get('nickname', 'unknown')
             desc = video_info.get('desc', '')[:50].replace('/', '_')
@@ -994,56 +1087,79 @@ class UnifiedDownloader:
             if dt_obj is None:
                 dt_obj = datetime.fromtimestamp(time.time())
             create_time = dt_obj.strftime('%Y-%m-%d_%H-%M-%S')
-            
+
             folder_name = f"{create_time}_{desc}" if desc else create_time
             save_dir = self.save_path / author_name / folder_name
             save_dir.mkdir(parents=True, exist_ok=True)
-            
+
             success = True
-            
+
             if is_image:
                 # 下载图文（无水印）
                 images = video_info.get('images', [])
-                for i, img in enumerate(images):
+                total_images = len(images)
+
+                for i, img in enumerate(images, 1):
                     img_url = self._get_best_quality_url(img.get('url_list', []))
                     if img_url:
-                        file_path = save_dir / f"image_{i+1}.jpg"
-                        if await self._download_file(img_url, file_path):
-                            logger.info(f"下载图片 {i+1}/{len(images)}: {file_path.name}")
+                        file_path = save_dir / f"image_{i}.jpg"
+                        # 更新进度描述
+                        if progress and task_id is not None:
+                            progress.update(
+                                task_id,
+                                description=f"[cyan]下载图片 {i}/{total_images}: {file_path.name}[/cyan]",
+                                completed=(i - 1) * 100 / total_images
+                            )
+
+                        if await self._download_file_with_progress(img_url, file_path, progress, task_id, i, total_images):
+                            logger.debug(f"下载图片 {i}/{total_images}: {file_path.name}")
                         else:
                             success = False
+
+                # 更新完成状态
+                if progress and task_id is not None:
+                    progress.update(task_id, completed=100, description=f"[green]✓ 下载完成 {total_images} 张图片[/green]")
             else:
                 # 下载视频（无水印）
                 video_url = self._get_no_watermark_url(video_info)
                 if video_url:
                     file_path = save_dir / f"{folder_name}.mp4"
-                    if await self._download_file(video_url, file_path):
-                        logger.info(f"下载视频: {file_path.name}")
+                    if progress and task_id is not None:
+                        progress.update(task_id, description=f"[cyan]下载视频: {file_path.name}[/cyan]")
+
+                    if await self._download_file_with_progress(video_url, file_path, progress, task_id):
+                        logger.debug(f"下载视频: {file_path.name}")
                     else:
                         success = False
-                
+
                 # 下载音频
                 if self.config.get('music', True):
                     music_url = self._get_music_url(video_info)
                     if music_url:
                         file_path = save_dir / f"{folder_name}_music.mp3"
+                        if progress and task_id is not None:
+                            progress.update(task_id, description=f"[dim]下载音频...[/dim]")
                         await self._download_file(music_url, file_path)
-            
+
+                # 更新完成状态
+                if progress and task_id is not None:
+                    progress.update(task_id, completed=100, description=f"[green]✓ 下载完成[/green]")
+
             # 下载封面
             if self.config.get('cover', True):
                 cover_url = self._get_cover_url(video_info)
                 if cover_url:
                     file_path = save_dir / f"{folder_name}_cover.jpg"
                     await self._download_file(cover_url, file_path)
-            
+
             # 保存JSON数据
             if self.config.get('json', True):
                 json_path = save_dir / f"{folder_name}_data.json"
                 with open(json_path, 'w', encoding='utf-8') as f:
                     json.dump(video_info, f, ensure_ascii=False, indent=2)
-            
+
             return success
-            
+
         except Exception as e:
             logger.error(f"下载媒体文件失败: {e}")
             return False
@@ -1119,9 +1235,9 @@ class UnifiedDownloader:
         """下载文件"""
         try:
             if save_path.exists():
-                logger.info(f"文件已存在，跳过: {save_path.name}")
+                logger.debug(f"文件已存在，跳过: {save_path.name}")
                 return True
-            
+
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, headers=self.headers) as response:
                     if response.status == 200:
@@ -1132,9 +1248,48 @@ class UnifiedDownloader:
                     else:
                         logger.error(f"下载失败，状态码: {response.status}")
                         return False
-                        
+
         except Exception as e:
             logger.error(f"下载文件失败 {url}: {e}")
+            return False
+
+    async def _download_file_with_progress(self, url: str, save_path: Path, progress=None, task_id=None, current=1, total=1) -> bool:
+        """带进度显示的文件下载"""
+        try:
+            if save_path.exists():
+                logger.debug(f"文件已存在，跳过: {save_path.name}")
+                return True
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=self.headers) as response:
+                    if response.status == 200:
+                        total_size = int(response.headers.get('content-length', 0))
+                        chunk_size = 8192
+                        downloaded = 0
+
+                        with open(save_path, 'wb') as f:
+                            async for chunk in response.content.iter_chunked(chunk_size):
+                                f.write(chunk)
+                                downloaded += len(chunk)
+
+                                # 更新进度
+                                if progress and task_id is not None and total_size > 0:
+                                    if total > 1:
+                                        # 多文件情况下的进度计算
+                                        file_progress = downloaded / total_size
+                                        overall_progress = ((current - 1) + file_progress) * 100 / total
+                                        progress.update(task_id, completed=overall_progress)
+                                    else:
+                                        # 单文件进度
+                                        progress.update(task_id, completed=downloaded * 100 / total_size)
+
+                        return True
+                    else:
+                        logger.error(f"下载失败，状态码: {response.status}")
+                        return False
+
+        except Exception as e:
+            logger.error(f"下载文件失败: {e}")
             return False
     
     async def download_user_page(self, url: str) -> bool:
@@ -1183,70 +1338,106 @@ class UnifiedDownloader:
         max_count = self.config.get('number', {}).get('post', 0)
         cursor = 0
         downloaded = 0
-        
-        console.print(f"\n[green]开始下载用户发布的作品...[/green]")
-        
-        with Progress(
+        skipped = 0
+
+        console.print(f"\n[bold cyan]📥 开始下载用户发布的作品[/bold cyan]")
+        console.print(f"[dim]用户ID: {user_id}[/dim]")
+        if max_count > 0:
+            console.print(f"[dim]限制数量: {max_count}[/dim]")
+
+        # 创建独立的Progress实例，避免冲突
+        progress = Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
+            BarColumn(bar_width=40),
             TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TextColumn("[dim]•[/dim]"),
             TimeRemainingColumn(),
-            console=console
-        ) as progress:
-            
+            console=console,
+            refresh_per_second=2,
+            transient=True  # 完成后清除
+        )
+
+        with progress:
+
+            # 主任务进度条
+            main_task = progress.add_task(
+                "[yellow]获取作品列表...[/yellow]",
+                total=None
+            )
+
             while True:
                 # 限速
                 await self.rate_limiter.acquire()
-                
+
                 # 获取作品列表
                 posts_data = await self._fetch_user_posts(user_id, cursor)
                 if not posts_data:
                     break
-                
+
                 aweme_list = posts_data.get('aweme_list', [])
                 if not aweme_list:
                     break
-                
+
+                # 更新主任务
+                progress.update(
+                    main_task,
+                    description=f"[cyan]处理作品批次 (已下载: {downloaded}, 已跳过: {skipped})[/cyan]"
+                )
+
                 # 下载作品
                 for aweme in aweme_list:
                     if max_count > 0 and downloaded >= max_count:
-                        console.print(f"[yellow]已达到下载数量限制: {max_count}[/yellow]")
+                        console.print(f"\n[yellow]⚠️ 已达到下载数量限制: {max_count}[/yellow]")
                         return
-                    
+
                     # 时间过滤
                     if not self._check_time_filter(aweme):
+                        skipped += 1
                         continue
-                    
-                    # 创建下载任务
-                    task_id = progress.add_task(
-                        f"下载作品 {downloaded + 1}", 
-                        total=100
-                    )
-                    
+
                     # 增量判断
                     if self._should_skip_increment('post', aweme, sec_uid=user_id):
+                        skipped += 1
                         continue
-                    
+
+                    # 获取作品信息
+                    desc = aweme.get('desc', '无标题')[:30]
+                    aweme_type = '图文' if aweme.get('images') else '视频'
+
+                    # 创建下载任务
+                    task_id = progress.add_task(
+                        f"[cyan]{aweme_type}[/cyan] {desc}",
+                        total=100
+                    )
+
                     # 下载
-                    success = await self._download_media_files(aweme, progress)
-                    
+                    success = await self._download_media_files(aweme, progress, task_id)
+
                     if success:
                         downloaded += 1
-                        self.stats.success += 1  # 增加成功计数
-                        progress.update(task_id, completed=100)
+                        self.stats.success += 1
                         self._record_increment('post', aweme, sec_uid=user_id)
                     else:
-                        self.stats.failed += 1  # 增加失败计数
-                        progress.update(task_id, description="[red]下载失败[/red]")
-                
+                        self.stats.failed += 1
+                        progress.update(task_id, description=f"[red]✗ 失败[/red] {desc}")
+
+                    # 移除完成的任务（保持界面整洁）
+                    progress.remove_task(task_id)
+
                 # 检查是否有更多
                 if not posts_data.get('has_more'):
                     break
-                
+
                 cursor = posts_data.get('max_cursor', 0)
-        
-        console.print(f"[green]✅ 用户作品下载完成，共下载 {downloaded} 个[/green]")
+
+            # 完成主任务
+            progress.update(main_task, description="[green]✓ 作品下载完成[/green]")
+            progress.remove_task(main_task)
+
+        # 显示统计
+        console.print(f"\n[bold green]✅ 用户作品下载完成[/bold green]")
+        console.print(f"   下载: {downloaded} | 跳过: {skipped} | 失败: {self.stats.failed}")
     
     async def _fetch_user_posts(self, user_id: str, cursor: int = 0) -> Optional[Dict]:
         """获取用户作品列表"""
@@ -1297,17 +1488,33 @@ class UnifiedDownloader:
             max_count = 0
         cursor = 0
         downloaded = 0
+        skipped = 0
 
-        console.print(f"\n[green]开始下载用户喜欢的作品...[/green]")
+        console.print(f"\n[bold cyan]❤️ 开始下载用户喜欢的作品[/bold cyan]")
+        console.print(f"[dim]用户ID: {user_id}[/dim]")
+        if max_count > 0:
+            console.print(f"[dim]限制数量: {max_count}[/dim]")
 
-        with Progress(
+        # 创建独立的Progress实例
+        progress = Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
+            BarColumn(bar_width=40),
             TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TextColumn("[dim]•[/dim]"),
             TimeRemainingColumn(),
-            console=console
-        ) as progress:
+            console=console,
+            refresh_per_second=2,
+            transient=True
+        )
+
+        with progress:
+
+            # 主任务进度条
+            main_task = progress.add_task(
+                "[yellow]获取喜欢列表...[/yellow]",
+                total=None
+            )
 
             while True:
                 # 限速
@@ -1322,39 +1529,62 @@ class UnifiedDownloader:
                 if not aweme_list:
                     break
 
+                # 更新主任务
+                progress.update(
+                    main_task,
+                    description=f"[cyan]处理喜欢批次 (已下载: {downloaded}, 已跳过: {skipped})[/cyan]"
+                )
+
                 # 下载作品
                 for aweme in aweme_list:
                     if max_count > 0 and downloaded >= max_count:
-                        console.print(f"[yellow]已达到下载数量限制: {max_count}[/yellow]")
+                        console.print(f"\n[yellow]⚠️ 已达到下载数量限制: {max_count}[/yellow]")
                         return
 
                     if not self._check_time_filter(aweme):
+                        skipped += 1
                         continue
-
-                    task_id = progress.add_task(
-                        f"下载喜欢 {downloaded + 1}",
-                        total=100
-                    )
 
                     # 增量判断
                     if self._should_skip_increment('like', aweme, sec_uid=user_id):
+                        skipped += 1
                         continue
 
-                    success = await self._download_media_files(aweme, progress)
+                    # 获取作品信息
+                    desc = aweme.get('desc', '无标题')[:30]
+                    aweme_type = '图文' if aweme.get('images') else '视频'
+
+                    # 创建下载任务
+                    task_id = progress.add_task(
+                        f"[magenta]{aweme_type}[/magenta] {desc}",
+                        total=100
+                    )
+
+                    success = await self._download_media_files(aweme, progress, task_id)
 
                     if success:
                         downloaded += 1
-                        progress.update(task_id, completed=100)
+                        self.stats.success += 1
                         self._record_increment('like', aweme, sec_uid=user_id)
                     else:
-                        progress.update(task_id, description="[red]下载失败[/red]")
+                        self.stats.failed += 1
+                        progress.update(task_id, description=f"[red]✗ 失败[/red] {desc}")
+
+                    # 移除完成的任务
+                    progress.remove_task(task_id)
 
                 # 翻页
                 if not likes_data.get('has_more'):
                     break
                 cursor = likes_data.get('max_cursor', 0)
 
-        console.print(f"[green]✅ 喜欢作品下载完成，共下载 {downloaded} 个[/green]")
+            # 完成主任务
+            progress.update(main_task, description="[green]✓ 喜欢下载完成[/green]")
+            progress.remove_task(main_task)
+
+        # 显示统计
+        console.print(f"\n[bold green]✅ 喜欢作品下载完成[/bold green]")
+        console.print(f"   下载: {downloaded} | 跳过: {skipped} | 失败: {self.stats.failed}")
 
     async def _fetch_user_likes(self, user_id: str, cursor: int = 0) -> Optional[Dict]:
         """获取用户喜欢的作品列表"""
@@ -1826,10 +2056,10 @@ class UnifiedDownloader:
             "[dim]支持视频、图文、用户主页、合集批量下载[/dim]",
             border_style="cyan"
         ))
-        
+
         # 初始化Cookie与请求头
         await self._initialize_cookies_and_headers()
-        
+
         # 获取URL列表
         urls = self.config.get('link', [])
         # 兼容：单条字符串
@@ -1838,7 +2068,7 @@ class UnifiedDownloader:
         if not urls:
             console.print("[red]没有找到要下载的链接！[/red]")
             return
-        
+
         # 分析URL类型
         console.print(f"\n[cyan]📊 链接分析[/cyan]")
         url_types = {}
@@ -1846,39 +2076,40 @@ class UnifiedDownloader:
             content_type = self.detect_content_type(url)
             url_types[url] = content_type
             console.print(f"  • {content_type.upper()}: {url[:50]}...")
-        
+
         # 开始下载
-        console.print(f"\n[green]⏳ 开始下载 {len(urls)} 个链接...[/green]\n")
-        
+        console.print(f"\n[bold green]⏳ 开始下载 {len(urls)} 个链接[/bold green]\n")
+
+        # 简化进度显示，避免Progress冲突
         for i, url in enumerate(urls, 1):
             content_type = url_types[url]
-            console.print(f"[{i}/{len(urls)}] 处理: {url}")
-            
+            console.print(f"\n[{i}/{len(urls)}] 处理: {url}")
+
             if content_type == ContentType.VIDEO or content_type == ContentType.IMAGE:
-                await self.download_single_video(url)
+                # 为单个视频/图文创建独立的Progress
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    BarColumn(bar_width=40),
+                    TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                    console=console,
+                    transient=True
+                ) as progress:
+                    task = progress.add_task("正在下载...", total=100)
+                    await self.download_single_video(url, progress, task)
+
             elif content_type == ContentType.USER:
                 await self.download_user_page(url)
-                # 若配置包含 like 或 mix，顺带处理
-                modes = self.config.get('mode', ['post'])
-                if 'like' in modes:
-                    user_id = self.extract_id_from_url(url, ContentType.USER)
-                    if user_id:
-                        await self._download_user_likes(user_id)
-                if 'mix' in modes:
-                    user_id = self.extract_id_from_url(url, ContentType.USER)
-                    if user_id:
-                        await self._download_user_mixes(user_id)
             elif content_type == ContentType.MIX:
                 await self.download_mix(url)
             elif content_type == ContentType.MUSIC:
                 await self.download_music(url)
             else:
                 console.print(f"[yellow]不支持的内容类型: {content_type}[/yellow]")
-            
+
             # 显示进度
-            console.print(f"进度: {i}/{len(urls)} | 成功: {self.stats.success} | 失败: {self.stats.failed}")
-            console.print("-" * 60)
-        
+            console.print(f"[dim]进度: {i}/{len(urls)} | 成功: {self.stats.success} | 失败: {self.stats.failed}[/dim]")
+
         # 显示统计
         self._show_stats()
     
